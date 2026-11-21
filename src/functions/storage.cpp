@@ -199,7 +199,7 @@ unique_ptr<FunctionData> CheckoutBind(ClientContext &context, TableFunctionBindI
 	if (version != input.named_parameters.end() && !version->second.IsNull()) {
 		auto problem = notebook::CheckStoredVersion(version->second.GetValue<int64_t>());
 		if (!problem.empty()) {
-			throw InvalidInputException("notebook_checkout: %s (leave version out for the newest)", problem);
+			throw InvalidInputException("notebook_checkout: %s", problem);
 		}
 		result->version = version->second.GetValue<int32_t>();
 	}

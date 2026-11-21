@@ -86,8 +86,8 @@ struct ServerState {
 	std::atomic<bool> stopping {false};
 	std::mutex sessions_lock;
 	std::map<string, shared_ptr<Session>> sessions;
-	//! The current database of the latest notebook_start: where sessions opened from now on keep stored notebooks.
-	//! Guarded by sessions_lock.
+	//! The current database of the latest notebook_start: where a request without `db` keeps stored notebooks
+	//! (RequestDatabase). Guarded by sessions_lock.
 	string database;
 };
 
@@ -248,19 +248,53 @@ void LoadKept(DatabaseInstance &db, Session &session) {
 	}
 }
 
-shared_ptr<Session> GetSession(ServerState &state, const string &source) {
+//! The database a request's stored notebooks belong to: the `db` the page was opened with (notebook_start puts the
+//! current database in its URL), else that of the latest notebook_start.
+string RequestDatabase(ServerState &state, const http::Request &req, const Json &body) {
+	if (auto db = body.Get("db")) {
+		if (db->GetType() == Json::Type::STRING) {
+			return db->Str();
+		}
+	}
+	if (req.has_param("db")) {
+		return Param(req, "db");
+	}
+	std::lock_guard<std::mutex> guard(state.sessions_lock);
+	return state.database;
+}
+
+//! What identifies a session: a stored notebook with the database it is in, a file by its canonical path, so that
+//! `a.sql`, `./a.sql` and a link to it are one session.
+string SessionKey(DatabaseInstance &db, const string &source, const string &database) {
+	if (notebook::IsStoredSource(source)) {
+		// Database names are matched without case, as DuckDB does: `USE MYDB` and `USE mydb` are one database.
+		return "db\n" + StringUtil::Lower(database) + "\n" + source;
+	}
+	try {
+		return "file\n" + FileSystem::GetFileSystem(db).CanonicalizePath(source);
+	} catch (...) { // NOLINT: a path that cannot be resolved is its own key
+		return "file\n" + source;
+	}
+}
+
+shared_ptr<Session> GetSession(ServerState &state, const string &source, const string &database) {
 	if (source.empty()) {
 		throw InvalidInputException("No notebook given: add nb=<path> or nb=db:<name> to the URL");
 	}
-	std::lock_guard<std::mutex> guard(state.sessions_lock);
-	auto found = state.sessions.find(source);
-	if (found != state.sessions.end()) {
-		return found->second;
-	}
 	auto db = Database(state);
+	auto key = SessionKey(*db, source, database);
+	{
+		std::lock_guard<std::mutex> guard(state.sessions_lock);
+		auto found = state.sessions.find(key);
+		if (found != state.sessions.end()) {
+			return found->second;
+		}
+	}
+	// Read outside the server's lock: a slow read (a remote notebook, a large cache) must not hold up the requests of
+	// every other notebook.
 	auto session = make_shared_ptr<Session>();
 	session->source = source;
-	session->database = state.database;
+	session->database = database;
 	// The session outlives its requests: materialize=table results and temp tables are kept, not recomputed.
 	session->state.keep_tables = true;
 	bool exists = notebook::IsStoredSource(source) || FileSystem::GetFileSystem(*db).FileExists(source);
@@ -271,8 +305,18 @@ shared_ptr<Session> GetSession(ServerState &state, const string &source) {
 		// A new notebook: it becomes a file when first saved.
 		session->text = "-- %% [markdown]\n/*\n# Untitled\n*/\n\n-- %%\nSELECT 42 AS answer;\n";
 	}
-	state.sessions[source] = session;
-	return session;
+	std::lock_guard<std::mutex> guard(state.sessions_lock);
+	// Another request for the same notebook may have got there first: it wins, and this copy is dropped.
+	auto inserted = state.sessions.emplace(key, session);
+	return inserted.first->second;
+}
+
+shared_ptr<Session> GetSession(ServerState &state, const http::Request &req, const Json &body) {
+	return GetSession(state, Source(req, body), RequestDatabase(state, req, body));
+}
+
+shared_ptr<Session> GetSession(ServerState &state, const http::Request &req) {
+	return GetSession(state, req, Json());
 }
 
 const notebook::Cell &CellAt(const notebook::Notebook &notebook, const string &index) {
@@ -393,7 +437,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 	});
 
 	server.Get("/api/notebook", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
-		           auto session = GetSession(state, Param(req, "nb"));
+		           auto session = GetSession(state, req);
 		           std::lock_guard<std::mutex> guard(session->lock);
 		           auto db = Database(state);
 		           if (!session->ran) {
@@ -407,7 +451,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 	// Update the session's text (and optionally save it). Returns the analysis of the new text.
 	server.Post("/api/notebook", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
 		            auto body = Body(req);
-		            auto session = GetSession(state, Source(req, body));
+		            auto session = GetSession(state, req, body);
 		            std::lock_guard<std::mutex> guard(session->lock);
 		            auto db = Database(state);
 		            if (auto text = body.Get("text")) {
@@ -420,8 +464,18 @@ void Routes(shared_ptr<ServerState> &shared) {
 		            string note;
 		            if (body.Get("save") && body.Get("save")->Truthy()) {
 			            if (notebook::IsStoredSource(session->source)) {
+				            auto stored = notebook::ParseStoredSource(session->source);
+				            if (stored.version != 0) {
+					            // Saving would quietly make an old version the newest, over the edits made since.
+					            throw InvalidInputException(
+					                "%s is version %d of '%s', not the newest, and cannot be saved: open db:%s to save "
+					                "changes, or write this version to a file with notebook_checkout('%s', version := %d, "
+					                "file := ...)",
+					                session->source, stored.version, stored.name, stored.name, stored.name,
+					                stored.version);
+				            }
 				            Connection connection(*db);
-				            auto name = notebook::ParseStoredSource(session->source).name;
+				            auto name = stored.name;
 				            bool saved;
 				            auto version =
 				                SaveNotebookVersion(connection, session->database, name, session->text,
@@ -439,7 +493,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 
 	server.Post("/api/run", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
 		            auto body = Body(req);
-		            auto session = GetSession(state, Source(req, body));
+		            auto session = GetSession(state, req, body);
 		            // A run does not wait for a peek.
 		            session->peeks++;
 		            session->InterruptPeek();
@@ -455,9 +509,10 @@ void Routes(shared_ptr<ServerState> &shared) {
 		            RunningGuard running(*session, runner);
 		            auto notebook = AnalyzeText(*runner.Conn().context, session->text);
 		            runner.Prepare(notebook, session->source, {});
-		            // Before anything runs: a file that changes while the cells read it leaves them stale.
-		            auto versions = notebook::CacheEnabled(notebook) ? CacheFileVersions(*db, notebook)
-		                                                             : std::map<string, string>();
+		            // Before anything runs, and before each cell: a file that changes after a cell read it leaves it
+		            // stale, one an earlier cell wrote does not.
+		            RunFileVersions versions;
+		            versions.Start(*db, notebook);
 		            RunnerOptions options;
 		            options.charts = true;
 		            options.mark_values = true;
@@ -507,6 +562,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 				            results.Push(result);
 				            continue;
 			            }
+			            versions.BeforeCell(*db, notebook, cell);
 			            auto status = RunForEditor(runner, notebook, cell, options, result).status;
 			            // Serialised once, for the response and for the cache.
 			            auto done = RanFromResult(index, status, result);
@@ -521,7 +577,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 
 	server.Post("/api/variable", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
 		            auto body = Body(req);
-		            auto session = GetSession(state, Source(req, body));
+		            auto session = GetSession(state, req, body);
 		            std::lock_guard<std::mutex> guard(session->lock);
 		            auto name = body.Get("name") ? body.Get("name")->Str() : string();
 		            if (name.empty()) {
@@ -573,7 +629,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 	// into it. Answers `{reason}` instead of an error when there is nothing to show.
 	server.Post("/api/peek", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
 		            auto body = Body(req);
-		            auto session = GetSession(state, Source(req, body));
+		            auto session = GetSession(state, req, body);
 		            auto nothing = [&](const string &reason) {
 			            SendJson(res, Json::Object().Set("reason", Json::String(reason)));
 		            };
@@ -618,7 +674,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 	            }));
 
 	server.Get("/api/page", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
-		           auto session = GetSession(state, Param(req, "nb"));
+		           auto session = GetSession(state, req);
 		           std::lock_guard<std::mutex> guard(session->lock);
 		           // A page runs the cell's SQL: only once the reader has run something (DESIGN section 3).
 		           if (!session->trusted) {
@@ -647,7 +703,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 	           }));
 
 	server.Get("/api/options", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
-		           auto session = GetSession(state, Param(req, "nb"));
+		           auto session = GetSession(state, req);
 		           std::lock_guard<std::mutex> guard(session->lock);
 		           auto db = Database(state);
 		           auto values = Json::Array();
@@ -680,7 +736,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 
 	server.Get(
 	    "/api/catalog", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
-		    auto session = GetSession(state, Param(req, "nb"));
+		    auto session = GetSession(state, req);
 		    std::lock_guard<std::mutex> guard(session->lock);
 		    auto db = Database(state);
 		    // Until the reader runs something the catalog is the database's own: the session's views are not
@@ -739,11 +795,8 @@ void Routes(shared_ptr<ServerState> &shared) {
 		           for (auto &file : FileSystem::GetFileSystem(*db).Glob("*.sql")) {
 			           files.Push(Json::String(file.path));
 		           }
-		           string database;
-		           {
-			           std::lock_guard<std::mutex> guard(state.sessions_lock);
-			           database = state.database;
-		           }
+		           // The stored notebooks of the database this page belongs to.
+		           auto database = RequestDatabase(state, req, Json());
 		           Connection connection(*db);
 		           auto result =
 		               connection.Query("SELECT DISTINCT name FROM " +
@@ -759,7 +812,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 		           {
 			           std::lock_guard<std::mutex> guard(state.sessions_lock);
 			           for (auto &session : state.sessions) {
-				           open.Push(Json::String(session.first));
+				           open.Push(Json::String(session.second->source));
 			           }
 		           }
 		           SendJson(res, Json::Object().Set("files", files).Set("stored", stored).Set("open", open));
@@ -769,7 +822,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 	server.Post("/api/cache/clear",
 	            Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
 		            auto body = Body(req);
-		            auto session = GetSession(state, Source(req, body));
+		            auto session = GetSession(state, req, body);
 		            std::lock_guard<std::mutex> guard(session->lock);
 		            auto db = Database(state);
 		            auto removed = session->cache.Clear(*db, session->source);
@@ -778,7 +831,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 
 	server.Post("/api/interrupt", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
 		            auto body = Body(req);
-		            auto session = GetSession(state, Source(req, body));
+		            auto session = GetSession(state, req, body);
 		            std::lock_guard<std::mutex> guard(session->running_lock);
 		            if (session->running) {
 			            session->running->Interrupt();
@@ -788,7 +841,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 
 	server.Get(
 	    "/api/export", Handler(weak, [](ServerState &state, const http::Request &req, http::Response &res) {
-		    auto session = GetSession(state, Param(req, "nb"));
+		    auto session = GetSession(state, req);
 		    string text;
 		    {
 			    std::lock_guard<std::mutex> guard(session->lock);
@@ -819,7 +872,7 @@ void Routes(shared_ptr<ServerState> &shared) {
 	// Server-sent events: reports edits to the file made by another program. Each stream lasts
 	// about 30 seconds; EventSource reconnects by itself.
 	server.Get("/api/events", Handler(weak, [weak](ServerState &state, const http::Request &req, http::Response &res) {
-		           auto session = GetSession(state, Param(req, "nb"));
+		           auto session = GetSession(state, req);
 		           auto source = session->source;
 		           res.set_header("Cache-Control", "no-store");
 		           auto started = std::chrono::steady_clock::now();
@@ -898,23 +951,19 @@ public:
 		return state && !state->stopping;
 	}
 
-	//! Where sessions opened from now on read and save stored notebooks (Session::database).
-	void SetDatabase(const string &database) {
-		std::lock_guard<std::mutex> guard(lock);
-		if (state) {
-			std::lock_guard<std::mutex> sessions_guard(state->sessions_lock);
-			state->database = database;
-		}
-	}
-
-	void Start(int port) {
+	//! Starts the server unless it runs. `database`: the caller's current database, where a request whose page has no
+	//! `db` (Url) reads and saves stored notebooks; set before the server answers anything.
+	void Start(int port, const string &database) {
 		std::lock_guard<std::mutex> guard(lock);
 		if (Running()) {
+			std::lock_guard<std::mutex> sessions_guard(state->sessions_lock);
+			state->database = database;
 			return;
 		}
 		auto fresh = make_shared_ptr<ServerState>();
 		fresh->db = db;
 		fresh->token = RandomToken();
+		fresh->database = database;
 		fresh->http.set_keep_alive_max_count(100);
 		Routes(fresh);
 		if (port > 0) {
@@ -956,10 +1005,15 @@ public:
 		state.reset();
 	}
 
-	string Url(const string &source) {
+	//! The page for `source`. A stored notebook's page names its database, so it keeps reading and saving there
+	//! whatever a later notebook_start's USE was.
+	string Url(const string &source, const string &database) {
 		string url = "http://127.0.0.1:" + std::to_string(state->port) + "/?token=" + state->token;
 		if (!source.empty()) {
 			url += "&nb=" + StringUtil::URLEncode(source);
+		}
+		if (!database.empty()) {
+			url += "&db=" + StringUtil::URLEncode(database);
 		}
 		return url;
 	}
@@ -1050,9 +1104,9 @@ void StartScan(ClientContext &context, TableFunctionInput &data, DataChunk &outp
 	state.done = true;
 	auto &bind = data.bind_data->Cast<StartBindData>();
 	auto server = ObjectCache::GetObjectCache(context).GetOrCreate<NotebookServer>(CACHE_KEY, context.db);
-	server->Start(bind.port);
-	server->SetDatabase(CurrentDatabase(context));
-	auto url = server->Url(bind.source);
+	auto database = CurrentDatabase(context);
+	server->Start(bind.port, database);
+	auto url = server->Url(bind.source, database);
 	if (bind.open) {
 		OpenBrowser(url);
 	}

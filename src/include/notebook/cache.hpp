@@ -62,8 +62,10 @@ struct CacheSources {
 };
 CacheSources CellSources(const Cell &cell);
 
-//! True for a path on this machine's own file system: no `scheme://` other than `file://`. The cache looks only at
-//! these; a remote file's version would cost a request on every open and run, so its cells are `unverified`.
+//! True for a path on this machine's own file system: no `scheme://` other than `file://`, no UNC or device path but
+//! `\\?\` and a drive, nothing under the automounter's `/net/`. The cache looks only at these; a remote file's version
+//! would cost a request on every open and run, so its cells are `unverified`. A `~` path is judged as written: what
+//! it expands to is the user's own home, not something a notebook chooses.
 bool IsLocalPath(const std::string &path);
 
 //! True if a file modified at `modified` (microseconds since the epoch) may still change without its modified time
@@ -77,9 +79,43 @@ std::vector<std::string> CacheSourceFiles(const Notebook &notebook);
 //! One key per cell, in file order. `variables` maps a variable name (no `$`) to a text that
 //! identifies its value and type (CacheVariableKey); a variable that is missing counts as unset.
 //! `files` maps each path of CacheSourceFiles to a text that identifies its version (size, modified
-//! time, ETag); a path that is missing or maps to "" has no known version. Needs AnalyzeNotebook.
+//! time, ETag); a path that is missing or maps to "" has no known version, and one that starts with `?`
+//! is a version that may still change (ModifiedTooRecently): the key covers it but is not verified.
+//! `cell_files`, by cell index, replaces `files` for that cell and the views it reads (CacheViewClosure): the
+//! versions as they were just before it ran (of CacheReadFiles), so a file an earlier cell of the same run wrote
+//! counts as that cell read it, directly or through a view. Needs AnalyzeNotebook.
 std::vector<CacheKey> CacheKeys(const Notebook &notebook, const std::map<std::string, std::string> &variables,
-                                const std::map<std::string, std::string> &files = {});
+                                const std::map<std::string, std::string> &files = {},
+                                const std::map<size_t, std::map<std::string, std::string>> &cell_files = {});
+
+//! A cell another cell reads lazily, when it runs: one that makes views and keeps nothing. Its statements are CREATE
+//! VIEWs, plain queries and a final named query that is not materialize=table, and at least one makes a view. A cell
+//! with any other statement (a table, a variable, an insert) keeps what it read when it ran, and is keyed with its own
+//! versions throughout.
+bool IsLazyView(const Cell &cell);
+
+//! True for a cell that defines a view, which is read when it is used: a named query that is not materialize=table,
+//! or a CREATE VIEW. When such a cell is not a view (IsLazyView), its readers are unverified: the cell's
+//! key has the versions of when it ran, but what it defines is read as the reader runs.
+bool DefinesLazily(const Cell &cell);
+
+//! The cells a cell reads lazily (IsLazyView) that it depends on, and those they depend on through views, in file
+//! order. Their lazily read files are read when the cell runs.
+std::vector<size_t> CacheViewClosure(const Notebook &notebook, size_t index);
+
+//! The files a cell reads when it runs: its own CellSources and the lazily read files of CacheViewClosure.
+std::vector<std::string> CacheReadFiles(const Notebook &notebook, size_t index);
+
+//! A file version or entry key after the `?` mark: known, but not vouched for (ModifiedTooRecently, CacheEntryKey).
+//! No version or key text starts with `?` otherwise (versions start with a digit, `glob` or `missing`; keys are
+//! hashes), so the mark changes no layout and needs no CACHE_FORMAT: an older reader sees a marked key as stale.
+bool IsUnsure(const std::string &text);
+std::string StripUnsure(const std::string &text);
+std::string MarkUnsure(const std::string &text);
+
+//! What CacheEntry::key holds for a result made under `key`: the result key, after a `?` when the key was not
+//! verified. Such an entry is at best `unverified`, even once its files can be vouched for.
+std::string CacheEntryKey(const CacheKey &key);
 
 //! Identifies a variable's value in a key: its SQL type and its text.
 std::string CacheVariableKey(const std::string &type, const std::string &text, bool is_null);
@@ -99,7 +135,8 @@ bool CacheEnabled(const Notebook &notebook);
 std::set<std::string> SettableVariables(const Notebook &notebook);
 
 struct CacheEntry {
-	//! CacheKey::result of the cell when the result was made.
+	//! CacheKey::result of the cell when the result was made, after a `?` if that key was not verified
+	//! (CacheEntryKey).
 	std::string key;
 	//! CacheKey::data then: a redraw (charts only) may refresh the entry only while the data is unchanged.
 	std::string data;

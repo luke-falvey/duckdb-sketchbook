@@ -92,6 +92,284 @@ before	stale
 statement ok
 FROM notebook_cache_clear('{TEST_DIR}/nb_src_write.sql')
 
+# A cell is keyed with the files as it read them: one that reads what an earlier cell of the run wrote is not stale
+# after the run (it is unverified, the file being too new to vouch for when it was read), and never becomes fresh
+# by mistake: a later change to the file makes it stale
+statement ok
+COPY (SELECT '-- %% make' || chr(10) || 'COPY (SELECT range AS i FROM range(4)) TO ''{TEST_DIR}/nb_src_made.csv'' (HEADER);' || chr(10) || chr(10) || '-- %% made' || chr(10) || 'SELECT count(*) AS n FROM read_csv(''{TEST_DIR}/nb_src_made.csv'');' || chr(10)) TO '{TEST_DIR}/nb_src_made.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_made.sql', cache := true)
+
+sleep 2100 millisecond
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_made.sql') WHERE cell = 'made'
+----
+made	unverified
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_made.sql', cache := true)
+
+sleep 2100 millisecond
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_made.sql') WHERE cell = 'made'
+----
+made	unverified
+
+statement ok
+COPY (SELECT range AS i FROM range(9)) TO '{TEST_DIR}/nb_src_made.csv' (HEADER)
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_made.sql') WHERE cell = 'made'
+----
+made	stale
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_made.sql')
+
+# With file_search_path set, DuckDB may read a relative path from another directory than the one looked at: what
+# reads one is unverified
+statement ok
+COPY (SELECT '-- %% rel' || chr(10) || 'SELECT count(*) AS n FROM read_csv(''nb_src_rel.csv'');' || chr(10)) TO '{TEST_DIR}/nb_src_rel.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_rel.csv' (HEADER)
+
+statement ok
+SET GLOBAL file_search_path = '{TEST_DIR}'
+
+sleep 2100 millisecond
+
+query II
+SELECT name, status FROM notebook_run('{TEST_DIR}/nb_src_rel.sql', cache := true)
+----
+rel	ok
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_rel.sql')
+----
+rel	unverified
+
+statement ok
+RESET GLOBAL file_search_path
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_rel.sql')
+
+# The same when a cell of the notebook sets it (on the connection the cells run on, which opening never sees)
+statement ok
+COPY (SELECT '-- %%' || chr(10) || 'SET file_search_path = ''{TEST_DIR}'';' || chr(10) || chr(10) || '-- %% rel' || chr(10) || 'SELECT count(*) AS n FROM read_csv(''nb_src_rel.csv'');' || chr(10)) TO '{TEST_DIR}/nb_src_rel_set.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+query II
+SELECT name, status FROM notebook_run('{TEST_DIR}/nb_src_rel_set.sql', cache := true) WHERE name = 'rel'
+----
+rel	ok
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_rel_set.sql') WHERE cell = 'rel'
+----
+rel	unverified
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_rel_set.sql')
+
+# A file read through a view is read when the cell selecting from the view runs: what reads the view after a cell
+# rewrote the file is not stale (unverified: the file is too new to vouch for), while the view's own result is
+statement ok
+COPY (SELECT '-- %% v' || chr(10) || 'SELECT * FROM read_csv(''{TEST_DIR}/nb_src_view.csv'');' || chr(10) || chr(10) || '-- %% w' || chr(10) || 'COPY (SELECT range AS i FROM range(7)) TO ''{TEST_DIR}/nb_src_view.csv'' (HEADER);' || chr(10) || chr(10) || '-- %% r' || chr(10) || 'SELECT count(*) AS n FROM v;' || chr(10)) TO '{TEST_DIR}/nb_src_view.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_view.csv' (HEADER)
+
+sleep 2100 millisecond
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_view.sql', cache := true)
+
+sleep 2100 millisecond
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_view.sql') WHERE cell IN ('v', 'r') ORDER BY idx
+----
+v	stale
+r	unverified
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_view.sql')
+
+# The same one step further down: a table that reads the view, and a cell that reads the table
+statement ok
+COPY (SELECT '-- %% v' || chr(10) || 'SELECT * FROM read_csv(''{TEST_DIR}/nb_src_chain.csv'');' || chr(10) || chr(10) || '-- %% w' || chr(10) || 'COPY (SELECT range AS i FROM range(7)) TO ''{TEST_DIR}/nb_src_chain.csv'' (HEADER);' || chr(10) || chr(10) || '-- %% t materialize=table' || chr(10) || 'SELECT count(*) AS n FROM v;' || chr(10) || chr(10) || '-- %% s' || chr(10) || 'SELECT n + 1 AS m FROM t;' || chr(10)) TO '{TEST_DIR}/nb_src_chain.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_chain.csv' (HEADER)
+
+sleep 2100 millisecond
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_chain.sql', cache := true)
+
+sleep 2100 millisecond
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_chain.sql') WHERE cell IN ('t', 's') ORDER BY idx
+----
+t	unverified
+s	unverified
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_chain.sql')
+
+# The same for a view a cell CREATEs
+statement ok
+COPY (SELECT '-- %% mk' || chr(10) || 'CREATE OR REPLACE TEMP VIEW cv AS SELECT * FROM read_csv(''{TEST_DIR}/nb_src_cv.csv'');' || chr(10) || chr(10) || '-- %% w' || chr(10) || 'COPY (SELECT range AS i FROM range(7)) TO ''{TEST_DIR}/nb_src_cv.csv'' (HEADER);' || chr(10) || chr(10) || '-- %% r' || chr(10) || 'SELECT count(*) AS n FROM cv;' || chr(10)) TO '{TEST_DIR}/nb_src_cv.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_cv.csv' (HEADER)
+
+sleep 2100 millisecond
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_cv.sql', cache := true)
+
+sleep 2100 millisecond
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_cv.sql') WHERE cell = 'r'
+----
+r	unverified
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_cv.sql')
+
+# A cell that makes a table from the view it creates fills it when it runs: a reader of the table, run after the file
+# changed, is stale, not taken for what the file now holds
+statement ok
+COPY (SELECT '-- %% mk' || chr(10) || 'CREATE OR REPLACE TEMP VIEW cv AS SELECT * FROM read_csv(''{TEST_DIR}/nb_src_cvt.csv'');' || chr(10) || 'CREATE OR REPLACE TEMP TABLE ct AS SELECT count(*) AS n FROM cv;' || chr(10) || chr(10) || '-- %% w' || chr(10) || 'COPY (SELECT range AS i FROM range(7)) TO ''{TEST_DIR}/nb_src_cvt.csv'' (HEADER);' || chr(10) || chr(10) || '-- %% r' || chr(10) || 'SELECT n FROM ct;' || chr(10)) TO '{TEST_DIR}/nb_src_cvt.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+# A view spelled with a comment between the words, or RECURSIVE, is a view too
+statement ok
+COPY (SELECT '-- %% mk' || chr(10) || 'CREATE /* c */ OR REPLACE TEMP RECURSIVE VIEW cv(i) AS SELECT * FROM read_csv(''{TEST_DIR}/nb_src_cvc.csv'');' || chr(10) || chr(10) || '-- %% w' || chr(10) || 'COPY (SELECT range AS i FROM range(7)) TO ''{TEST_DIR}/nb_src_cvc.csv'' (HEADER);' || chr(10) || chr(10) || '-- %% r' || chr(10) || 'SELECT count(*) AS n FROM cv;' || chr(10)) TO '{TEST_DIR}/nb_src_cvc.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_cvt.csv' (HEADER)
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_cvc.csv' (HEADER)
+
+sleep 2100 millisecond
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_cvt.sql', cache := true)
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_cvc.sql', cache := true)
+
+sleep 2100 millisecond
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_cvt.sql') WHERE cell = 'r'
+----
+r	stale
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_cvc.sql') WHERE cell = 'r'
+----
+r	unverified
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_cvt.sql')
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_cvc.sql')
+
+# A cell that makes a view and keeps a table it fills from another cell's view is not a view: a reader of
+# the table, run after the file changed, is stale
+statement ok
+COPY (SELECT '-- %% a' || chr(10) || 'CREATE OR REPLACE TEMP VIEW cv AS SELECT * FROM read_csv(''{TEST_DIR}/nb_src_across.csv'');' || chr(10) || chr(10) || '-- %% mk' || chr(10) || 'CREATE OR REPLACE TEMP VIEW d AS SELECT 1 AS one;' || chr(10) || 'CREATE OR REPLACE TEMP TABLE ct AS SELECT count(*) AS n FROM cv;' || chr(10) || chr(10) || '-- %% w' || chr(10) || 'COPY (SELECT range AS i FROM range(7)) TO ''{TEST_DIR}/nb_src_across.csv'' (HEADER);' || chr(10) || chr(10) || '-- %% r' || chr(10) || 'SELECT n FROM ct;' || chr(10)) TO '{TEST_DIR}/nb_src_across.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_across.csv' (HEADER)
+
+sleep 2100 millisecond
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_across.sql', cache := true)
+
+sleep 2100 millisecond
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_across.sql') WHERE cell IN ('mk', 'r') ORDER BY cell
+----
+mk	stale
+r	stale
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_across.sql')
+
+# A cell that keeps state (a variable) but whose final named query is a view: the view is read as its reader runs,
+# so the reader is unverified even when every key matches
+statement ok
+COPY (SELECT '-- %% mk' || chr(10) || 'SET VARIABLE nb_src_k = 1;' || chr(10) || 'SELECT * FROM read_csv(''{TEST_DIR}/nb_src_later.csv'');' || chr(10) || chr(10) || '-- %% r' || chr(10) || 'SELECT count(*) AS n FROM mk;' || chr(10)) TO '{TEST_DIR}/nb_src_later.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_later.csv' (HEADER)
+
+sleep 2100 millisecond
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_later.sql', cache := true)
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_later.sql') ORDER BY idx
+----
+mk	fresh
+r	unverified
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_later.sql')
+
+# A cell that sets home_directory changes what `~` reads, which looking it up here would not see: unverified
+statement ok
+COPY (SELECT '-- %% s' || chr(10) || 'SET home_directory = ''{TEST_DIR}'';' || chr(10) || chr(10) || '-- %% r' || chr(10) || 'SELECT count(*) AS n FROM read_csv(''~/nb_src_home.csv'');' || chr(10)) TO '{TEST_DIR}/nb_src_home.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+COPY (SELECT 1 AS i) TO '{TEST_DIR}/nb_src_home.csv' (HEADER)
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_home.sql', cache := true)
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_home.sql') WHERE cell = 'r'
+----
+r	unverified
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_home.sql')
+
+# The database's own home_directory counts too
+statement ok
+COPY (SELECT '-- %% r' || chr(10) || 'SELECT count(*) AS n FROM read_csv(''~/nb_src_home.csv'');' || chr(10)) TO '{TEST_DIR}/nb_src_home_db.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+SET GLOBAL home_directory = '{TEST_DIR}'
+
+statement ok
+FROM notebook_run('{TEST_DIR}/nb_src_home_db.sql', cache := true)
+
+query II
+SELECT cell, status FROM notebook_cache('{TEST_DIR}/nb_src_home_db.sql')
+----
+r	unverified
+
+statement ok
+RESET GLOBAL home_directory
+
+statement ok
+FROM notebook_cache_clear('{TEST_DIR}/nb_src_home_db.sql')
+
 # Clean up: all test files share one database
 query I
 SELECT removed FROM notebook_cache_clear('{TEST_DIR}/nb_src.sql')

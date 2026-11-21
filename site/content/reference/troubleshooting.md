@@ -55,6 +55,7 @@ List them all with: SELECT start_line, errors FROM notebook_cells('broken.sql') 
 | The file runs as a script but stops at the second cell | Run as plain SQL, cells cannot read each other by name. Use `notebook_sql` to get the expanded script |
 | A chart shows ⚠ | The chart's error is in its tab. The cell's table still shows. `notebook_chart_query` shows what the spec compiled to |
 | A chart draws a flat colour or one mark | A column name was misspelt and read as a constant. Write `{field: name}` to get an error instead |
+| `notebook_run` or `notebook_export` fails with `Query exceeded maximum execution time` | `max_execution_time` bounds the whole call, every cell and query together, whichever cell ran out of time. Raise it (`SET max_execution_time = …`, in milliseconds), or `RESET` it |
 
 ## The server and the editor
 
@@ -97,7 +98,7 @@ List them all with: SELECT start_line, errors FROM notebook_cells('broken.sql') 
 | Symptom | Cause and fix |
 |---|---|
 | `notebook_export: PDF needs Chrome, Chromium or Edge…` | Install one, or pass `chrome := '/path/to/browser'` or set `NOTEBOOK_CHROME` |
-| `notebook_export: format 'pdf' runs a browser to print the page, which is not allowed with external access disabled …` | The database has `enable_external_access = false`. Export `html` and print it from a browser |
+| `notebook_export: format 'pdf' runs a browser to print the page, which is not allowed with external access disabled …` or `… while the configuration is locked …` | The database has `enable_external_access = false` or `lock_configuration = true`. Export `html` and print it from a browser |
 | html-wasm export asks for a runtime | Build it once with `sh wasm/build.sh` (needs Node and npm) and pass `wasm_runtime := 'wasm/dist'` |
 | Inputs do nothing in an exported page | Plain HTML exports freeze inputs. Use `interactive := 'precomputed'` or `format := 'html-wasm'` |
 | Some inputs are frozen in a precomputed export | They cannot be enumerated (text, dates, sliders without `step=`, more than 50 values) or did not fit the `budget`. The export's `note` names them |
@@ -109,7 +110,10 @@ List them all with: SELECT start_line, errors FROM notebook_cells('broken.sql') 
 | Symptom | Cause and fix |
 |---|---|
 | `No notebooks are stored in database "x": there is no _sketchbook.versions table` | Nothing has been saved in that database. Check you opened the right file and `USE`d the right database, or pass `database :=` |
-| `"db:x@abc" has version "abc": a version is a whole number from 1…` | Versions are numbered from 1. Leave `@…` out for the latest |
+| `"db:x@abc" has version "abc": a version is a whole number from 1 to 2147483647…`, `version 0 is not valid: …` | Versions are numbered from 1. Leave `@…` (or `version :=`) out for the latest |
+| `notebook_save: the name "report@2" holds '@', which starts a version…` | A name cannot hold `@`. Pass another `name :=`, such as `'report-2'` |
+| `db:x@1 is version 1 of 'x', not the newest, and cannot be saved…` (in the editor) | Saving would make the old version the newest. Open `db:x` to save changes, or write the old version to a file with `notebook_checkout('x', version := 1, file := …)` |
+| The editor opened a stored notebook from another database than the one `USE` chose | The page's URL names its database (`&db=…`). Open the URL the latest `notebook_start` returned |
 | `notebook_cells: the notebook path must not be NULL` | The path argument was `NULL`, often from a column or variable that is not set |
 | `notebook_save: "x.sql" matches version 1 of 'x', but version 2 is newer…` | You are saving an old version over newer work. Check out the latest first, or pass `force := true` |
 | `notebook_checkout: "x.sql" has changes that are not saved in 'x'…` | The file has unsaved work. Save it with `notebook_save`, or pass `force := true` |

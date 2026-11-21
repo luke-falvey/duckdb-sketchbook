@@ -22,6 +22,9 @@ Use a file-backed database. Notebooks saved into `:memory:` are gone when DuckDB
 - Saving text identical to the latest version stores nothing (`saved` is false).
 - Saving text identical to an **older** version is refused, because it would bury newer work. Check
   out the newer version first, or pass `force := true`.
+- A name holds no `@`, which starts a version in `db:<name>@<version>`: save `report@2.sql` with
+  `name := 'report-2'`. A name saved with an `@` before this rule is still read, as
+  `db:report@2@1` (the version follows the last `@`).
 
 ## Use a stored notebook
 
@@ -51,17 +54,20 @@ pass `force := true` to overwrite anyway. Without `file :=` it only returns the 
 ## Another attached database
 
 Both functions use the current database, the one `USE` chose, and take `database :=` to use the
-`_sketchbook` schema of another attached database. So does the editor: `notebook_start('db:revenue')`
-after `USE reports` opens, saves and caches `revenue` in `reports`.
-
-A stored name holds no `@`, which starts a version in `db:<name>@<version>`: save `report@2.sql` with
-`name := 'report-2'`.
+`_sketchbook` schema of another attached database.
 
 ```sql
 ATTACH 'reports.duckdb' AS reports;
 FROM notebook_save('revenue.sql', database := 'reports');
 FROM notebook_checkout('revenue', database := 'reports', file := 'revenue.sql');
 ```
+
+The editor also uses the current database: `notebook_start('db:revenue')` after `USE reports` opens,
+saves and caches `revenue` in `reports`. The page's URL names that database (`&db=reports`), so the
+page keeps to it whatever a later `USE` and `notebook_start` do: after `USE work`,
+`notebook_start('db:revenue')` opens `work`'s `revenue`, a notebook of its own. The editor opens an old
+version (`db:revenue@1`) but does not save it, which would make it the newest: open `db:revenue` to save,
+or check the version out to a file.
 
 ## The tables
 

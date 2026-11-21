@@ -654,6 +654,183 @@ def test_session_store(browser, work):
     check(stored == ["2", "true"], f"its versions and its cache are in the database USE chose ({stored})")
 
 
+def test_session_keys(browser, work):
+    # Round 3 of the review: a server session is a stored notebook in its database (db:x after USE a and after USE b
+    # are two notebooks, and each page keeps to its own) or a file by its canonical path; saving keeps a symlink and
+    # refuses an old version; cache entries are readable by their owner only.
+    folder = os.path.join(work, "session_keys")
+    os.makedirs(folder)
+    with open(os.path.join(folder, "real.sql"), "w") as f:
+        f.write("-- %% one\nSELECT 1 AS one;\n")
+    link = os.path.join(folder, "link.sql")
+    os.symlink("real.sql", link)
+    for name, text in (("x_a.sql", "in a"), ("x_b1.sql", "in b, first"), ("x_b2.sql", "in b, second")):
+        with open(os.path.join(folder, name), "w") as f:
+            f.write(f"-- %% which\nSELECT '{text}' AS w;\n")
+    setup = (
+        "ATTACH 'a.duckdb' AS a; ATTACH 'b.duckdb' AS b; "
+        "USE b; SELECT count(*) FROM notebook_save('x_b1.sql', name := 'x'); "
+        "SELECT count(*) FROM notebook_save('x_b2.sql', name := 'x'); "
+        "USE a; SELECT count(*) FROM notebook_save('x_a.sql', name := 'x');"
+    )
+    shell, line = serve(folder, "db:x", setup=setup)
+    # The counts notebook_save printed come first.
+    while not line.startswith("http"):
+        line = shell.stdout.readline().strip()
+    url_a = line
+    shell.stdin.write("USE b; SELECT url FROM notebook_start('db:x', open := false);\n")
+    shell.stdin.flush()
+    url_b = shell.stdout.readline().strip()
+    base = url_a.split("&nb=")[0]
+    try:
+        check("db=a" in url_a and "db=b" in url_b, f"notebook_start names its current database in the URL ({url_b})")
+        texts = []
+        for url in (url_a, url_b, url_a):
+            page = browser.new_page()
+            page.goto(still(url))
+            page.wait_for_selector(".nb-cell")
+            texts.append(page.evaluate("App.text()"))
+            page.close()
+        check(
+            "in a" in texts[0] and "in b, second" in texts[1] and "in a" in texts[2],
+            "db:x after USE a and after USE b are two notebooks, and a page keeps to its database",
+        )
+
+        # A file reached through a symlink is saved through it: the link stays a link.
+        page = browser.new_page()
+        page.goto(still(base + "&nb=link.sql"))
+        page.wait_for_selector(".nb-cell")
+        note = page.evaluate(
+            """async () => {
+          await App.api('POST', '/api/run', {text: App.text(), cells: null});
+          return (await App.api('POST', '/api/notebook', {text: App.text() + '\\n-- saved through the link\\n',
+                                                         save: true})).note;
+        }"""
+        )
+        with open(os.path.join(folder, "real.sql")) as f:
+            saved = f.read()
+        check(
+            os.path.islink(link) and "saved through the link" in saved,
+            f"saving a symlinked notebook writes the file it points to and keeps the link ({note})",
+        )
+        modes = []
+        for root, _, names in os.walk(os.path.join(folder, ".duckdb-sketchbook")):
+            modes += [os.stat(os.path.join(root, n)).st_mode & 0o777 for n in names if n.endswith(".json")]
+        check(modes and all(m & 0o077 == 0 for m in modes), f"cache entries are readable by their owner only {modes}")
+        page.close()
+
+        # real.sql, ./real.sql and link.sql are one notebook, so one session.
+        for nb in ("real.sql", "./real.sql"):
+            page = browser.new_page()
+            page.goto(still(base + "&nb=" + nb))
+            page.wait_for_selector(".nb-cell")
+            page.close()
+        page = browser.new_page()
+        page.goto(still(url_b.replace("nb=db%3Ax", "nb=db%3Ax%401")))
+        page.wait_for_selector(".nb-cell")
+        result = page.evaluate(
+            """async () => {
+          const open = (await App.api('GET', '/api/notebooks')).open;
+          let refused = '';
+          try {
+            await App.api('POST', '/api/notebook', {text: App.text(), save: true});
+          } catch (e) {
+            refused = e.message;
+          }
+          return {open, refused, text: App.text()};
+        }"""
+        )
+        files = [s for s in result["open"] if s.endswith("real.sql") or s.endswith("link.sql")]
+        check(len(files) == 1, f"a file opened by three paths is one session ({result['open']})")
+        check(
+            "in b, first" in result["text"] and "not the newest" in result["refused"],
+            f"an old version opens but is not saved over the newest ({result['refused']})",
+        )
+        page.close()
+    finally:
+        stop(shell)
+    versions = sql(os.path.join(folder, "b.duckdb"), "SELECT count(*) FROM _sketchbook.versions WHERE name = 'x'")
+    check(versions.split() == ["2"], f"nothing was saved from the old version ({versions.split()})")
+
+    # The store makes a table whose foreign key names another after that one, whatever their names.
+    with open(os.path.join(folder, "fk.sql"), "w") as f:
+        f.write(
+            "-- %% parent\nCREATE TEMP TABLE parent(id INTEGER PRIMARY KEY);\nINSERT INTO parent VALUES (1);\n\n"
+            "-- %% child\nCREATE TEMP TABLE child(x INTEGER REFERENCES parent(id));\n\n"
+            "-- %% bad\nINSERT INTO child VALUES (2);\n"
+        )
+    shell, url = serve(folder, "fk.sql")
+    try:
+        page = browser.new_page()
+        page.goto(still(url))
+        page.wait_for_selector(".nb-cell")
+        result = page.evaluate(
+            """async () => {
+          await App.api('POST', '/api/run', {text: App.text(), cells: [0, 1]});
+          const r = await App.api('POST', '/api/run', {text: App.text(), cells: [2]});
+          return r.results[0].status + ' ' + (r.results[0].error || '');
+        }"""
+        )
+        check(result.startswith("error") and "foreign key" in result.lower(), f"a foreign key survives the store ({result})")
+        page.close()
+    finally:
+        stop(shell)
+
+    # When a table a cell made cannot be copied into the store (SKETCHBOOK_TEST_FAIL_STORE_COPY makes the copy fail),
+    # that cell's tables are made again by its SQL and none comes from the store, and no later cell copies them in:
+    # either would clash with that replay.
+    with open(os.path.join(folder, "copy.sql"), "w") as f:
+        f.write(
+            "-- %% mk\nCREATE TEMP TABLE b AS SELECT 2 AS y;\nCREATE TEMP TABLE a AS SELECT 1 AS x;\n\n"
+            "-- %% ins\nINSERT INTO b VALUES (3);\n\n"
+            "-- %% look\nSELECT (SELECT count(*) FROM a) AS na, (SELECT count(*) FROM b) AS nb;\n"
+        )
+    os.environ["SKETCHBOOK_TEST_FAIL_STORE_COPY"] = "a"
+    try:
+        shell, url = serve(folder, "copy.sql")
+    finally:
+        del os.environ["SKETCHBOOK_TEST_FAIL_STORE_COPY"]
+    try:
+        page = browser.new_page()
+        page.goto(still(url))
+        page.wait_for_selector(".nb-cell")
+        result = page.evaluate(
+            """async () => {
+          const out = [];
+          for (const cells of [[0], [1], [2]]) {
+            const r = await App.api('POST', '/api/run', {text: App.text(), cells});
+            out.push(r.results[0].status + (r.results[0].error ? ' ' + r.results[0].error : ''));
+          }
+          const look = await App.api('POST', '/api/run', {text: App.text(), cells: [2]});
+          out.push(JSON.stringify(look.results[0].data.rows));
+          return out;
+        }"""
+        )
+        check(
+            result[:3] == ["ok", "ok", "ok"] and result[3] == "[[1,1]]",
+            f"a failed copy into the store replays the cell's tables, in later requests too ({result})",
+        )
+        page.close()
+    finally:
+        stop(shell)
+
+    # Database names are matched without case: USE B and USE b open one session.
+    shell, url_upper = serve(folder, "db:x", setup="ATTACH 'b.duckdb' AS b; USE B;")
+    try:
+        shell.stdin.write("USE b; SELECT url FROM notebook_start('db:x', open := false);\n")
+        shell.stdin.flush()
+        url_lower = shell.stdout.readline().strip()
+        page = browser.new_page()
+        for url in (url_upper, url_lower):
+            page.goto(still(url))
+            page.wait_for_selector(".nb-cell")
+        opened = page.evaluate("async () => (await App.api('GET', '/api/notebooks')).open")
+        check(opened.count("db:x") == 1, f"a stored notebook is one session whatever the case of its database ({opened})")
+        page.close()
+    finally:
+        stop(shell)
+
+
 def test_cache_written_later(browser, work):
     # B24: a session reads the store again until it has run, so results a scheduled
     # notebook_run(cache := true) writes after the editor opened appear on the next reload.
@@ -3283,6 +3460,7 @@ def main():
             test_cache_redraw_stale(browser, work)
             test_cache_variables_reloaded(browser, work)
             test_session_store(browser, work)
+            test_session_keys(browser, work)
             test_input_widget(browser, work)
             test_brush_listeners(browser, work)
             # The headless shell prints PDFs too and needs fewer system libraries than full Chrome.

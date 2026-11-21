@@ -61,7 +61,8 @@ var AppExtra = (function () {
         var v = sel.value;
         if (v === '__new') v = prompt('Path of the new notebook', 'untitled.sql');
         if (!v) return;
-        location.search = '?token=' + encodeURIComponent(App.token) + '&nb=' + encodeURIComponent(v);
+        location.search = '?token=' + encodeURIComponent(App.token) + '&nb=' + encodeURIComponent(v) +
+          (App.database ? '&db=' + encodeURIComponent(App.database) : '');
       };
     }).catch(function () {});
   };

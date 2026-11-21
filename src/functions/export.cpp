@@ -187,7 +187,7 @@ Json CellJson(const notebook::Cell &cell) {
 Json BuildPayload(DatabaseInstance &db, const string &text, const string &source, const ExportOptions &options) {
 	SessionState state;
 	DetachOnExit detach {db, {}};
-	Runner runner(db, state);
+	Runner runner(db, state, options.caller);
 	auto notebook = AnalyzeText(*runner.Conn().context, text);
 	ThrowIfInvalid(notebook, source);
 	PrepareOnce(runner, detach, notebook, source, options.params);
@@ -254,7 +254,7 @@ namespace {
 Json WasmPayload(DatabaseInstance &db, const string &text, const string &source, const ExportOptions &options) {
 	SessionState state;
 	DetachOnExit detach {db, {}};
-	Runner runner(db, state);
+	Runner runner(db, state, options.caller);
 	auto &connection = runner.Conn();
 	auto notebook = AnalyzeText(*connection.context, text);
 	PrepareOnce(runner, detach, notebook, source, options.params);
@@ -508,7 +508,7 @@ string ExportDocument(DatabaseInstance &db, const string &text, const string &so
 		// Run once per combination of input values, within the budget; the page swaps between them.
 		SessionState state;
 		DetachOnExit detach {db, {}};
-		Runner runner(db, state);
+		Runner runner(db, state, options.caller);
 		auto notebook = AnalyzeText(*runner.Conn().context, text);
 		// Choices may come from cells (select from=cell.column), which must run first.
 		PrepareOnce(runner, detach, notebook, source, options.params);
@@ -534,7 +534,8 @@ string ExportDocument(DatabaseInstance &db, const string &text, const string &so
 					values.push_back(Value::DOUBLE(v));
 				}
 			}
-			if (values.empty() || combinations * values.size() > options.budget) {
+			// combinations * values.size() > budget, without overflowing on a huge budget.
+			if (values.empty() || values.size() > options.budget / combinations) {
 				frozen.push_back(cell.name);
 				continue;
 			}
@@ -790,28 +791,34 @@ void Scan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	state.done = true;
 	auto &bind = data.bind_data->Cast<ExportBindData>();
 	auto &db = DatabaseInstance::GetDatabase(context);
+	// Every run of the export stops when this call is interrupted or runs out of max_execution_time.
+	auto options = bind.options;
+	options.caller = &context;
 	auto text = ReadNotebookText(context, bind.source);
 	auto &fs = FileSystem::GetFileSystem(context);
 	string note;
 	int64_t bytes = 0;
-	auto format = bind.options.format;
+	auto format = options.format;
 
 	if (format == "data") {
 		// One file per named query cell, written from the run's own session.
+		SessionState session;
+		DetachOnExit detach {db, {}};
+		Runner runner(db, session, &context);
+		auto notebook = AnalyzeText(*runner.Conn().context, text);
+		ThrowIfInvalid(notebook, bind.source);
+		PrepareOnce(runner, detach, notebook, bind.source, options.params);
+		RunnerOptions run;
+		run.params = options.params;
+		runner.RunAll(notebook, run);
+		runner.CheckCaller();
+		// Only once the run is done: a run past the call's deadline leaves no directory. The files are written one by
+		// one, so a deadline that passes while they are written leaves those written so far.
 		if (!fs.DirectoryExists(bind.to)) {
 			fs.CreateDirectory(bind.to);
 		}
-		SessionState session;
-		DetachOnExit detach {db, {}};
-		Runner runner(db, session);
-		auto notebook = AnalyzeText(*runner.Conn().context, text);
-		ThrowIfInvalid(notebook, bind.source);
-		PrepareOnce(runner, detach, notebook, bind.source, bind.options.params);
-		RunnerOptions run;
-		run.params = bind.options.params;
-		runner.RunAll(notebook, run);
 		idx_t files = 0;
-		auto extension = bind.options.data_format == "csv" ? ".csv" : ".parquet";
+		auto extension = options.data_format == "csv" ? ".csv" : ".parquet";
 		for (auto &cell : notebook.cells) {
 			if (cell.kind != notebook::CellKind::SQL || !cell.is_query || cell.name.empty()) {
 				continue;
@@ -819,9 +826,13 @@ void Scan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 			auto path = fs.JoinPath(bind.to, cell.name + extension);
 			auto result = runner.Conn().Query("COPY (SELECT * FROM " + notebook::QuoteIdentifier(cell.name) + ") TO " +
 			                                  notebook::QuoteString(path) + " (FORMAT " +
-			                                  (bind.options.data_format == "csv" ? "csv" : "parquet") + ")");
+			                                  (options.data_format == "csv" ? "csv" : "parquet") + ")");
 			if (result->HasError()) {
-				throw InvalidInputException("notebook_export: cell '%s': %s", cell.name, result->GetError());
+				auto error = result->GetError();
+				result.reset();
+				// Out of the call's time: the same INTERRUPT error as every other export and notebook_run.
+				runner.CheckCaller();
+				throw InvalidInputException("notebook_export: cell '%s': %s", cell.name, error);
 			}
 			files++;
 		}
@@ -832,27 +843,33 @@ void Scan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 		                              "sketchbook extension cannot do (it was built without host features, as for "
 		                              "DuckDB-WASM). Export html and print it from the browser instead");
 #endif
-		auto browser = FindBrowser(fs, bind.options.chrome);
+		auto browser = FindBrowser(fs, options.chrome);
 		if (browser.empty()) {
 			throw InvalidInputException("notebook_export: PDF needs Chrome, Chromium or Edge. Pass chrome := "
 			                            "'/path/to/browser' or set NOTEBOOK_CHROME, or export html and print it");
 		}
-		ExportOptions html_options = bind.options;
+		ExportOptions html_options = options;
 		html_options.format = "html";
 		auto html = ExportDocument(db, text, bind.source, html_options, note);
+		// A run that took past the call's deadline fails, whichever cell ran out of time, rather than prints its
+		// errors.
+		CheckCallerDeadline(context);
 		// The page is printed as it opens: no handwriting, whatever headless Chrome's clock does, and
 		// the normal width whatever the notebook or the reader chose (paper has its own width).
 		html = notebook::ReplaceAll(html, "<html lang=\"en\">",
 		                            "<html lang=\"en\" data-ink=\"off\" data-width-fixed=\"normal\">");
 		// A name of its own, so that no file of the reader's (report.html beside report.pdf) is overwritten.
-		auto html_path = bind.to + "." + UUID::ToString(UUID::GenerateRandomUUID()) + ".html";
+		// Beside the file a link points to, so that the printed PDF moves over it without crossing file systems.
+		auto target = fs.CanonicalizePath(bind.to);
+		auto html_path = target + "." + UUID::ToString(UUID::GenerateRandomUUID()) + ".html";
 		WriteTextFile(context, html_path, html);
-		// An older PDF must not pass for this one if the browser writes nothing.
-		fs.TryRemoveFile(bind.to);
+		// Printed to a file of its own, moved over the target once printed: an older PDF neither passes for this one
+		// if the browser writes nothing, nor is lost if it fails.
+		auto pdf_path = target + "." + UUID::ToString(UUID::GenerateRandomUUID()) + ".pdf";
 		auto command = ShellQuote(browser) +
 		               " --headless --disable-gpu --no-sandbox --no-pdf-header-footer --virtual-time-budget=10000 "
 		               "--print-to-pdf=" +
-		               ShellQuote(bind.to) + " " + ShellQuote(FileUrl(fs, html_path));
+		               ShellQuote(pdf_path) + " " + ShellQuote(FileUrl(fs, html_path));
 #ifdef _WIN32
 		// cmd.exe strips the first and last quote of a command line that starts with one.
 		command = "\"" + command + " >NUL 2>&1\"";
@@ -860,14 +877,28 @@ void Scan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 		command += " >/dev/null 2>&1";
 #endif
 		auto status = std::system(command.c_str());
-		fs.RemoveFile(html_path);
-		if (status != 0 || !fs.FileExists(bind.to)) {
+		fs.TryRemoveFile(html_path);
+		if (status != 0 || !fs.FileExists(pdf_path)) {
+			fs.TryRemoveFile(pdf_path);
 			throw InvalidInputException("notebook_export: %s failed to print the PDF (exit status %d)", browser,
 			                            status);
 		}
+		try {
+			// Over the file a link points to, as WriteFile does: the link stays a link.
+			fs.MoveFile(pdf_path, target);
+		} catch (...) {
+			try {
+				fs.TryRemoveFile(pdf_path);
+			} catch (...) { // NOLINT: the move's error is the one to report
+			}
+			throw;
+		}
 		note = "printed with " + browser;
 	} else {
-		auto document = ExportDocument(db, text, bind.source, bind.options, note);
+		auto document = ExportDocument(db, text, bind.source, options, note);
+		// A run that took past the call's deadline fails, whichever cell ran out of time, rather than writes its
+		// errors.
+		CheckCallerDeadline(context);
 		WriteTextFile(context, bind.to, document);
 		bytes = static_cast<int64_t>(document.size());
 	}

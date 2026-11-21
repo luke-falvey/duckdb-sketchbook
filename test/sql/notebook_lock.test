@@ -4,6 +4,14 @@
 
 require sketchbook
 
+# A limit set before the lock still bounds notebook_run, though SET is refused there (checked at the end). It bounds
+# every statement below too, so it is generous; the slow cell takes far longer (about 20 s)
+statement ok
+COPY (SELECT '-- %% slow' || chr(10) || 'SELECT sum(a.range * b.range) FROM range(400000) a, range(400000) b;' || chr(10)) TO '__TEST_DIR__/nb_lock_slow.sql' (FORMAT csv, HEADER false, QUOTE '')
+
+statement ok
+SET max_execution_time = 1500
+
 statement ok
 SET lock_configuration = true;
 
@@ -21,3 +29,8 @@ the notebook server cannot be started while the configuration is locked
 # Exports that run nothing outside DuckDB still work
 statement ok
 FROM notebook_export('test/notebooks/basic.sql', file := '__TEST_DIR__/nb_lock.md', format := 'md')
+
+statement error
+FROM notebook_run('__TEST_DIR__/nb_lock_slow.sql')
+----
+maximum execution time

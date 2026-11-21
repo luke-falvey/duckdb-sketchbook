@@ -34,6 +34,12 @@ std::string StoredTable(const std::string &store, const std::string &name);
 //! Whether a statement is CREATE [OR REPLACE] TEMP[ORARY] TABLE.
 bool IsCreateTempTable(const std::string &statement);
 
+//! Whether a statement is CREATE [OR REPLACE] [TEMP[ORARY]] VIEW.
+bool IsCreateView(const std::string &statement);
+
+//! Whether a SQL cell of the notebook SETs or RESETs the setting `name` (any scope), such as `file_search_path`.
+bool SetsSetting(const Notebook &notebook, const std::string &name);
+
 //! Whether a SQL cell has a statement that may change tables: anything but queries, SET, RESET, USE
 //! and SET VARIABLE.
 bool MayWrite(const Cell &cell);

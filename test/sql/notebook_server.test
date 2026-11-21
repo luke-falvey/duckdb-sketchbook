@@ -5,7 +5,7 @@
 require sketchbook
 
 query II
-SELECT url LIKE 'http://127.0.0.1:%/?token=%&nb=test%2Fnotebooks%2Fbasic.sql', length(token) FROM notebook_start('test/notebooks/basic.sql', open := false)
+SELECT url LIKE 'http://127.0.0.1:%/?token=%&nb=test%2Fnotebooks%2Fbasic.sql&db=memory', length(token) FROM notebook_start('test/notebooks/basic.sql', open := false)
 ----
 true	32
 

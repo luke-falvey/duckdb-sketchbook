@@ -4,18 +4,24 @@ var App = (function () {
   'use strict';
   var params = new URLSearchParams(location.search);
   var A = {
-    token: params.get('token') || '', source: params.get('nb') || '', preamble: '', cells: [],
+    // db: the database the page's stored notebooks are in (notebook_start puts its current database here).
+    token: params.get('token') || '', source: params.get('nb') || '', database: params.get('db') || '', preamble: '', cells: [],
     dirty: false, autorun: true, live: false, reading: false, graph: false, selected: {}, running: false, lastText: '',
     // Rows per page for tables whose cell has no rows= option; remembered in this browser.
     pageSize: +(localStorage.getItem('nb.pageSize') || 25)
   };
   var $ = function (id) { return document.getElementById(id); };
 
+  // The notebook every request is about: `nb=…`, and `&db=…` when the page has one.
+  A.query = function () {
+    return 'nb=' + encodeURIComponent(A.source) + (A.database ? '&db=' + encodeURIComponent(A.database) : '');
+  };
   A.api = function (method, path, body) {
-    var url = path + (path.indexOf('?') >= 0 ? '&' : '?') + 'nb=' + encodeURIComponent(A.source);
+    var url = path + (path.indexOf('?') >= 0 ? '&' : '?') + A.query();
+    var target = A.database ? { nb: A.source, db: A.database } : { nb: A.source };
     return fetch(url, {
       method: method, headers: { 'X-Notebook-Token': A.token, 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(Object.assign({ nb: A.source }, body)) : undefined
+      body: body ? JSON.stringify(Object.assign(target, body)) : undefined
     }).then(function (r) {
       return r.json().then(function (j) { if (!r.ok || j.error) throw new Error(j.error || r.statusText); return j; });
     });
@@ -744,7 +750,7 @@ var App = (function () {
   // ---- File sync ----------------------------------------------------------------------------
   A.watch = function () {
     if (!window.EventSource) return;
-    var es = new EventSource('/api/events?nb=' + encodeURIComponent(A.source) + '&token=' + encodeURIComponent(A.token));
+    var es = new EventSource('/api/events?' + A.query() + '&token=' + encodeURIComponent(A.token));
     es.addEventListener('changed', function (e) {
       var data = JSON.parse(e.data);
       if (data.text === A.text() || data.text === A.lastText) return;
@@ -764,7 +770,7 @@ var App = (function () {
     var f = $('export-format').value, code = $('export-code').checked, out = $('export-output').checked;
     var hide = !code && !out ? 'all' : !code ? 'code' : !out ? 'output' : 'none';
     var format = f === 'html-precomputed' ? 'html&interactive=precomputed' : f;
-    return '/api/export?nb=' + encodeURIComponent(A.source) + '&token=' + encodeURIComponent(A.token) + '&format=' + format + '&hide=' + hide;
+    return '/api/export?' + A.query() + '&token=' + encodeURIComponent(A.token) + '&format=' + format + '&hide=' + hide;
   };
 
   A.menu = function (open) {

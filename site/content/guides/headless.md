@@ -54,6 +54,20 @@ duckdb -unsigned -init /dev/null -c "LOAD sketchbook" \
 With the shell built in the repository (`./build/release/duckdb`) the extension is linked in, so
 `-unsigned` and `LOAD` are not needed.
 
+## A time limit
+
+`SET max_execution_time` (milliseconds) bounds the whole `notebook_run` or `notebook_export` call, not
+each cell or query: every query the notebook runs ends by the call's deadline, whatever a cell `SET`s,
+and once it has passed the call fails with *Query exceeded maximum execution time*, whichever cell ran
+out of time. A job that must not hang sets it before running:
+
+```sh
+duckdb -init /dev/null -c "SET max_execution_time = 600000" \
+  -c "SELECT name, status, error FROM notebook_run('report.sql') WHERE status = 'error'"
+```
+
+An interrupt (Ctrl-C) stops the call before the next cell.
+
 ## A check that fails the build
 
 This exits non-zero if any cell has a format error or fails to run:

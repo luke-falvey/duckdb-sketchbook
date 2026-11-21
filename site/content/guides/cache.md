@@ -48,14 +48,27 @@ cell it reads, reads:
   attaches, like `wh.orders`);
 - a file named by a variable (`read_csv($path)`), a file whose file system reports neither a
   modified time nor a version tag, or a file modified in the last two seconds (modified times are often
-  whole seconds, so it could still change unseen);
-- a remote file (`https://`, `s3://` and any other `scheme://` but `file://`): the cache never looks at
-  one, so opening or running a notebook costs no request;
+  whole seconds, so it could still change unseen). A result made from such a file stays unverified;
+  a cell that reads a file the cell before it wrote is usually one;
+- a remote file (`https://`, `s3://` and any other `scheme://` but `file://`), a UNC path
+  (`\\server\share\x.csv`), a Windows device path (`\\.\…`, `\\?\…`), a
+  path with a `net` or `network` segment in it (`/net/host/…`), a glob with a pattern in a folder name or
+  a `**` (`data/*/x.csv`, `/data/**`; `data/*.csv` is fine),
+  or a `file:` URL to one of those: the cache never looks at one, so opening or running a notebook costs
+  no request;
+- a relative path while `file_search_path` is set, or a `~` path while `home_directory` is set, for the
+  database or by a cell of the notebook, which DuckDB may read from somewhere else;
 - another kind of external data: `delta_scan`, `iceberg_scan`, `postgres_query` and the like, and any
   table function but `range`, `generate_series`, `unnest`, `json_each`, `json_tree` and `repeat_row`
   (an extension's reader such as `st_read`, or a table macro).
 
-Files are looked at just before a run, so one that changes while the cells read it leaves them stale.
+Files are looked at just before each cell runs, so a cell is kept with the files as it read them: one
+that changes after the cell read it (a later cell rewrites it, or anything else does) leaves it stale.
+A cell that selects from a view (a named query, or a `CREATE VIEW`) reads the view's files as it runs,
+and is kept with those too. That holds for a cell that only makes views (a named query, not
+`materialize=table`, or `CREATE VIEW`s and plain queries). A cell that also makes a table, sets a
+variable or inserts rows keeps what it read when it ran, so its readers are kept with the files as they
+were then; and a reader of a view such a cell makes is unverified, since the view is read as it runs.
 
 Run such a cell when its data may have changed. [FORMAT §8](../reference/format.md#8-sidecar-cache)
 has the exact rules.
@@ -88,7 +101,11 @@ location cannot be written, there is quietly no cache; a run never fails because
 
 Results kept before the extension was renamed from `notebook` to `sketchbook`, in `.duckdb-notebook/`
 or `_notebook.cache`, are still shown until the notebook is next run; clearing the cache clears them
-too.
+too. So are the results of a stored notebook kept in the default database before its cache followed
+`USE`, unless the default database stores a notebook of that name, whose results they are.
+
+Entry files are readable by their owner only: they hold query results, which the notebook itself
+does not.
 
 Each entry is the result the editor was sent: status, row count, timing, rendered prose, the first page
 of a query's rows, each chart's data, an input's value and choices. A result larger than **4 MiB** is

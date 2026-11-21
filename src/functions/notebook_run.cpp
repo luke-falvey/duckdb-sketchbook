@@ -107,27 +107,16 @@ unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionI
 	DetachOnExit detach {db, {}};
 	{
 		// A separate connection gives the notebook its own temp views and variables, while sharing
-		// the caller's attached databases.
-		Runner runner(db, session);
+		// the caller's attached databases. The caller's interrupt and max_execution_time bound the whole run: the
+		// runner stops before the next cell, and no query of its connection outlives the call's deadline.
+		Runner runner(db, session, &context);
 		PrepareOnce(runner, detach, bind_data.notebook, bind_data.path, bind_data.params);
-		auto limit = Settings::Get<MaxExecutionTimeSetting>(context);
-		if (limit > 0) {
-			// A session setting: the caller's limit applies to each of the notebook's queries too.
-			auto result = runner.Conn().Query("SET SESSION max_execution_time = " + std::to_string(limit));
-			(void)result;
-		}
-		std::map<string, string> versions;
+		RunFileVersions versions;
 		if (bind_data.cache) {
+			// Every cell runs, and is keyed with the files as it read them (BeforeCell): nothing to take beforehand.
 			cache.Load(db, bind_data.path, bind_data.notebook);
-			// Before anything runs: a file that changes while the cells read it leaves them stale.
-			versions = CacheFileVersions(db, bind_data.notebook);
 		}
 		for (auto index : bind_data.order) {
-			// The cells run on the runner's own connection, which the caller's interrupt does not reach: stop
-			// between cells instead (a long cell is bounded by the caller's max_execution_time, below).
-			if (context.IsInterrupted()) {
-				throw InterruptException();
-			}
 			auto &cell = cells[NumericCast<idx_t>(index)];
 			RunnerOptions options;
 			options.params = bind_data.params;
@@ -135,6 +124,8 @@ unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionI
 			options.charts = true;
 			CellOutcome outcome;
 			if (bind_data.cache) {
+				// As the cell reads them: a file an earlier cell wrote counts as written.
+				versions.BeforeCell(db, bind_data.notebook, cell);
 				// The result the editor would be sent: a page of rows, chart data, marked {{ }} values.
 				options.page_rows = 100;
 				options.mark_values = true;
@@ -148,6 +139,8 @@ unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionI
 			}
 			state->outcomes.emplace_back(cell.index, std::move(outcome));
 		}
+		// The last cell may have run out of the call's time: the call fails then, as it does when an earlier one did.
+		runner.CheckCaller();
 		if (bind_data.cache) {
 			runner.Save();
 			cache.Record(db, bind_data.path, bind_data.notebook, session, ran, &versions);

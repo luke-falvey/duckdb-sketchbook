@@ -1,0 +1,27 @@
+# name: test/sql/notebook_export_pdf.test
+# description: A PDF export that fails to print leaves an older PDF as it was, and nothing beside it
+# group: [sql]
+
+require sketchbook
+
+require notwindows
+
+statement ok
+COPY (SELECT 'an older pdf' AS s) TO '{TEST_DIR}/nb_pdf_keep.pdf' (FORMAT csv, HEADER false)
+
+# /bin/false starts and prints nothing: the export fails
+statement error
+FROM notebook_export('test/notebooks/basic.sql', format := 'pdf', file := '{TEST_DIR}/nb_pdf_keep.pdf', chrome := '/bin/false')
+----
+failed to print the PDF
+
+query I
+SELECT replace(content, chr(10), '') FROM read_text('{TEST_DIR}/nb_pdf_keep.pdf')
+----
+an older pdf
+
+# Neither the page it would have printed nor a half-written PDF is left beside it
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/nb_pdf_keep.pdf.*')
+----
+0

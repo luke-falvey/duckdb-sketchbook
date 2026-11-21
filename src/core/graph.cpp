@@ -113,7 +113,7 @@ std::set<std::string> CollectReferences(Cell &cell, const ReferenceExtractor &ex
 	}
 	case CellKind::MARKDOWN:
 		for (auto &expression : cell.expressions) {
-			analyse("SELECT (" + expression.sql + ")", "{{ " + expression.sql + " }}");
+			analyse("SELECT (" + expression.sql + "\n)", "{{ " + expression.sql + " }}");
 		}
 		break;
 	case CellKind::CHART: {

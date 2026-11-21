@@ -119,7 +119,8 @@ in order, at `chrome :=`, the `NOTEBOOK_CHROME` environment variable, the `PATH`
 `msedge.exe` on Windows), and then the usual install places: `Program Files` and `AppData\Local` on
 Windows, `/Applications` on macOS. So on most machines with Chrome or Edge installed it needs no
 setting. Handwriting is off in PDFs. Printing starts another program, so it is refused when
-`enable_external_access` is false. On Windows the output path cannot contain `%`, `#` or `?`, which
+`enable_external_access` is false or `lock_configuration` is set. The PDF is printed to a file of its
+own and moved over `file :=` once printed, so a failed print leaves an older PDF as it was. On Windows the output path cannot contain `%`, `#` or `?`, which
 the command line that starts the browser cannot pass safely.
 
 ## Markdown

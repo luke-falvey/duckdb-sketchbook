@@ -19,9 +19,14 @@ std::string CheckStoredName(const std::string &name) {
 	return std::string();
 }
 
+namespace {
+//! What both version errors say: a version given as a number (version :=) or after the `@` of db:<name>@<version>.
+const char *const VERSION_RULE = "a version is a whole number from 1 to 2147483647; leave it out for the newest";
+} // namespace
+
 std::string CheckStoredVersion(int64_t version) {
 	if (version < 1 || version > std::numeric_limits<int32_t>::max()) {
-		return "version " + std::to_string(version) + " is not valid: versions start at 1";
+		return "version " + std::to_string(version) + " is not valid: " + VERSION_RULE;
 	}
 	return std::string();
 }
@@ -48,8 +53,7 @@ StoredSource ParseStoredSource(const std::string &source) {
 		}
 	}
 	if (!valid || !CheckStoredVersion(version).empty()) {
-		result.error = "\"" + source + "\" has version \"" + digits +
-		               "\": a version is a whole number from 1 (db:<name>@<version>), or leave it out for the newest";
+		result.error = "\"" + source + "\" has version \"" + digits + "\": " + VERSION_RULE;
 		return result;
 	}
 	result.version = static_cast<int32_t>(version);

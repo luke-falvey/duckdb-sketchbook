@@ -4,9 +4,11 @@
 #include "duckdb/common/path.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_config.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/query_result_stream.hpp"
+#include "duckdb/main/settings.hpp"
 #include "notebook/chart.hpp"
 #include "notebook/functions.hpp"
 #include "notebook/script.hpp"
@@ -32,6 +34,24 @@ idx_t CellRows(const notebook::Cell &cell) {
 }
 
 namespace {
+
+//! Ends every query of a runner's connection by the caller's deadline at the latest (Runner): DuckDB sets each query's
+//! deadline from max_execution_time as the query begins (ClientContext::BeginQueryInternal), then calls QueryBegin on
+//! every registered state, so this has the last word whatever a cell SETs. Internal DuckDB API: recheck that order when
+//! DuckDB is updated (notebook_run.test, the same-cell SET max_execution_time = 0 case, fails if it changes).
+class CallerDeadline : public ClientContextState {
+public:
+	explicit CallerDeadline(idx_t deadline) : deadline(deadline) {
+	}
+	void QueryBegin(ClientContext &context) override {
+		if (!context.query_deadline.IsValid() || context.query_deadline.GetIndex() > deadline) {
+			context.query_deadline = deadline;
+		}
+	}
+
+private:
+	idx_t deadline;
+};
 
 //! A float as the double of its shortest decimal, so 0.1f travels as 0.1 and not 0.10000000149011612.
 double FloatAsDouble(float value) {
@@ -233,14 +253,44 @@ SessionStore::~SessionStore() {
 	}
 }
 
-Runner::Runner(DatabaseInstance &db, SessionState &state) : state(state) {
+Runner::Runner(DatabaseInstance &db, SessionState &state, optional_ptr<ClientContext> caller)
+    : state(state), caller(caller) {
 	connection = make_uniq<Connection>(db);
 	auto &config = ClientConfig::GetConfig(*connection->context);
 	for (auto &variable : state.variables) {
 		config.SetUserVariable(variable.first, variable.second);
 	}
+	// Before anything runs on the connection, the replay and the [notebook] cell's ATTACH included.
+	CheckCaller();
+	if (caller && caller->query_deadline.IsValid()) {
+		// Every query the runner's connection starts ends by the caller's deadline at the latest, whatever a cell
+		// SETs: the deadline itself, not a duration that each query would get afresh.
+		// Once per connection: each Runner has a connection of its own.
+		connection->context->registered_state->Insert(
+		    "sketchbook_caller_deadline", make_shared_ptr<CallerDeadline>(caller->query_deadline.GetIndex()));
+	}
 	// The rest of the session is replayed on first use (Restore), so that the caller can register the
 	// connection for interrupts and time limits first.
+}
+
+void CheckCallerDeadline(ClientContext &context) {
+	if (context.IsInterrupted()) {
+		throw InterruptException();
+	}
+	if (!context.query_deadline.IsValid()) {
+		return;
+	}
+	auto now = NumericCast<idx_t>(
+	    std::chrono::duration_cast<std::chrono::milliseconds>(steady_clock::now().time_since_epoch()).count());
+	if (now >= context.query_deadline.GetIndex()) {
+		throw InterruptException(ClientContext::QUERY_DEADLINE_ERROR);
+	}
+}
+
+void Runner::CheckCaller() {
+	if (caller) {
+		CheckCallerDeadline(*caller);
+	}
 }
 
 void Runner::Restore() {
@@ -251,28 +301,46 @@ void Runner::Restore() {
 	// Best effort throughout: a replayed view whose source has since been dropped fails here and the
 	// cell reports the problem when it is next run.
 	if (state.store) {
-		for (auto &table : state.tables) {
-			auto stored = notebook::StoredTable(state.store->name, table);
-			auto quoted = "temp.main." + notebook::QuoteIdentifier(table);
-			// The table as it was created (keys, defaults, generated columns), then its rows.
+		// The table as it was created (keys, defaults, generated columns), then its rows. A table whose statement
+		// names another (a foreign key) can be made only after it: what fails is tried again while any succeeds.
+		auto create = [&](const string &table) {
 			auto ddl = state.table_ddl.find(table);
-			if (ddl != state.table_ddl.end() && !ddl->second.first.empty()) {
-				auto created = connection->Query(ddl->second.first);
-				if (!created->HasError()) {
-					created.reset();
-					auto filled = connection->Query("INSERT INTO " + quoted + " (" + ddl->second.second + ") SELECT " +
-					                                ddl->second.second + " FROM " + stored);
-					if (!filled->HasError()) {
-						continue;
-					}
-				}
-				created.reset();
-				auto dropped = connection->Query("DROP TABLE IF EXISTS " + quoted);
-				(void)dropped;
+			if (ddl == state.table_ddl.end() || ddl->second.first.empty()) {
+				return false;
 			}
+			auto quoted = "temp.main." + notebook::QuoteIdentifier(table);
+			auto created = connection->Query(ddl->second.first);
+			if (!created->HasError()) {
+				created.reset();
+				auto filled =
+				    connection->Query("INSERT INTO " + quoted + " (" + ddl->second.second + ") SELECT " +
+				                      ddl->second.second + " FROM " + notebook::StoredTable(state.store->name, table));
+				if (!filled->HasError()) {
+					return true;
+				}
+			}
+			created.reset();
+			auto dropped = connection->Query("DROP TABLE IF EXISTS " + quoted);
+			(void)dropped;
+			return false;
+		};
+		vector<string> pending(state.tables.begin(), state.tables.end());
+		for (bool progress = true; progress && !pending.empty();) {
+			progress = false;
+			vector<string> failed;
+			for (auto &table : pending) {
+				if (create(table)) {
+					progress = true;
+				} else {
+					failed.push_back(table);
+				}
+			}
+			pending = std::move(failed);
+		}
+		for (auto &table : pending) {
 			// Rows only: the statement cannot run here (it uses a temp sequence, which is replayed later).
 			auto result = connection->Query("CREATE OR REPLACE TEMP TABLE " + notebook::QuoteIdentifier(table) +
-			                                " AS FROM " + stored);
+			                                " AS FROM " + notebook::StoredTable(state.store->name, table));
 			(void)result;
 		}
 	}
@@ -311,9 +379,30 @@ bool Runner::KeepTempTables(const notebook::Cell &cell) {
 	if (store.empty()) {
 		return true;
 	}
+	std::set<string> own;
+	for (auto &name : cell.defines) {
+		own.insert(StringUtil::Lower(name));
+	}
+	// The cell's own CREATE TEMP TABLE statements are replayed instead (Run). The tables they make must then not come
+	// from the store as well, or replaying them fails on a table that already exists: none of them is kept.
+	auto replay_own = [&]() {
+		for (auto it = state.tables.begin(); it != state.tables.end();) {
+			if (!own.count(StringUtil::Lower(*it))) {
+				++it;
+				continue;
+			}
+			auto dropped = connection->Query("DROP TABLE IF EXISTS " + notebook::StoredTable(store, *it));
+			(void)dropped;
+			state.table_ddl.erase(*it);
+			it = state.tables.erase(it);
+		}
+		state.replayed.insert(own.begin(), own.end());
+		return false;
+	};
 	auto listed = connection->Query("SELECT table_name, sql FROM duckdb_tables() WHERE database_name = 'temp'");
 	if (listed->HasError()) {
-		return false;
+		listed.reset();
+		return replay_own();
 	}
 	std::set<string> present;
 	std::map<string, string> ddl;
@@ -328,27 +417,36 @@ bool Runner::KeepTempTables(const notebook::Cell &cell) {
 	listed.reset();
 	bool kept_all = true;
 	std::set<string> mentioned;
-	for (auto &name : cell.defines) {
-		mentioned.insert(StringUtil::Lower(name));
-	}
+	mentioned.insert(own.begin(), own.end());
 	for (auto &name : cell.reads) {
 		mentioned.insert(StringUtil::Lower(name));
 	}
+	// For tests only (test_browser.py): the copy of the table this names fails, as it would if the store ran out of
+	// memory. Read once per process; DESIGN §11 names it. It changes nothing unless set.
+	static const string fail_copy = StringUtil::Lower(FileSystem::GetEnvVariable("SKETCHBOOK_TEST_FAIL_STORE_COPY"));
 	for (auto &table : present) {
+		auto lower = StringUtil::Lower(table);
 		// A table this cell may have changed, or one that is new: copy it, rows and all.
-		if (state.tables.count(table) && !mentioned.count(StringUtil::Lower(table))) {
+		if (state.tables.count(table) && !mentioned.count(lower)) {
 			continue;
 		}
-		auto copied = connection->Query("CREATE OR REPLACE TABLE " + notebook::StoredTable(store, table) +
-		                                " AS FROM temp.main." + notebook::QuoteIdentifier(table));
+		if (state.replayed.count(lower) && !own.count(lower)) {
+			// Another cell's replay makes it again: a copy here would clash with that replay. It keeps only what that
+			// cell's SQL makes, as every table did before the store.
+			continue;
+		}
+		auto copied =
+		    connection->Query("CREATE OR REPLACE TABLE " + notebook::StoredTable(store, table) + " AS FROM temp.main." +
+		                      notebook::QuoteIdentifier(table) +
+		                      (!fail_copy.empty() && lower == fail_copy ? " WHERE error('copy failed')" : ""));
 		if (copied->HasError()) {
-			// Not an older copy either: the cell's SQL is replayed for it instead (Run).
-			kept_all = false;
 			copied.reset();
-			auto dropped = connection->Query("DROP TABLE IF EXISTS " + notebook::StoredTable(store, table));
-			(void)dropped;
-			state.tables.erase(table);
-			state.table_ddl.erase(table);
+			if (own.count(StringUtil::Lower(table))) {
+				// The cell made it: its SQL is replayed for it instead (Run), with the cell's other tables.
+				kept_all = false;
+			}
+			// A table an earlier cell made and this one changed keeps its older copy: nothing else could make it
+			// again, and an older table is better than none.
 			continue;
 		}
 		copied.reset();
@@ -377,7 +475,14 @@ bool Runner::KeepTempTables(const notebook::Cell &cell) {
 		state.table_ddl.erase(*it);
 		it = state.tables.erase(it);
 	}
-	return kept_all;
+	if (!kept_all) {
+		return replay_own();
+	}
+	for (auto &name : own) {
+		// Copied this time: the store has them again, and the cell's replay leaves them out.
+		state.replayed.erase(name);
+	}
+	return true;
 }
 
 Runner::~Runner() {
@@ -488,6 +593,7 @@ void Runner::ApplyMetadata(const notebook::Notebook &notebook, const string &sou
 }
 
 void Runner::Prepare(const notebook::Notebook &notebook, const string &source, const std::map<string, Value> &params) {
+	CheckCaller();
 	ApplyMetadata(notebook, source);
 	InitializeVariables(notebook, params);
 }
@@ -695,6 +801,7 @@ Json Runner::Charts(const notebook::Notebook &notebook, const notebook::Cell &ce
 
 CellOutcome Runner::Run(const notebook::Notebook &notebook, const notebook::Cell &cell, const RunnerOptions &options,
                         Json *data) {
+	CheckCaller();
 	Restore();
 	CellOutcome outcome;
 	auto start = steady_clock::now();
@@ -717,7 +824,8 @@ CellOutcome Runner::Run(const notebook::Notebook &notebook, const notebook::Cell
 		string rendered;
 		size_t copied = 0;
 		for (auto &expression : cell.expressions) {
-			auto result = connection->Query("SELECT (" + expression.sql + ")");
+			auto result =
+			    connection->Query("SELECT (" + expression.sql + "\n)"); // a trailing -- comment ends at the newline
 			if (result->HasError()) {
 				outcome.status = "error";
 				outcome.error = "{{ " + expression.sql + " }}: " + result->GetError();

@@ -112,12 +112,12 @@ notebook_cells: "db:" names no notebook
 statement error
 FROM notebook_checkout('basic', version := 0)
 ----
-notebook_checkout: version 0 is not valid: versions start at 1
+notebook_checkout: version 0 is not valid: a version is a whole number from 1 to 2147483647
 
 statement error
 FROM notebook_checkout('basic', version := -1)
 ----
-notebook_checkout: version -1 is not valid: versions start at 1
+notebook_checkout: version -1 is not valid: a version is a whole number from 1 to 2147483647
 
 # A NULL version is the newest, like leaving it out
 query I
@@ -203,6 +203,75 @@ statement error
 FROM notebook_checkout('used')
 ----
 No stored notebook 'used'
+
+# A cache written before it followed USE, in the default database, is still read and cleared (never written)
+statement ok
+CREATE TABLE memory._sketchbook.cache AS SELECT * FROM nb_use._sketchbook.cache WHERE name = 'used'
+
+statement ok
+DELETE FROM nb_use._sketchbook.cache WHERE name = 'used'
+
+statement ok
+USE nb_use
+
+query I
+SELECT count(*) > 0 FROM notebook_cache('db:used')
+----
+true
+
+query I
+SELECT removed > 0 FROM notebook_cache_clear('db:used')
+----
+true
+
+query I
+SELECT count(*) FROM memory._sketchbook.cache WHERE name = 'used'
+----
+0
+
+statement ok
+USE memory
+
+statement ok
+DROP TABLE memory._sketchbook.cache
+
+# Not when the default database stores a notebook of that name: that cache is its own, and is neither shown for nor
+# cleared with the other database's notebook
+statement ok
+FROM notebook_save('test/notebooks/basic.sql', name := 'used')
+
+statement ok
+FROM notebook_run('db:used', cache := true)
+
+statement ok
+USE nb_use
+
+query I
+SELECT count(*) FROM notebook_cache('db:used')
+----
+0
+
+query I
+SELECT removed FROM notebook_cache_clear('db:used')
+----
+0
+
+statement ok
+USE memory
+
+query I
+SELECT count(*) > 0 FROM memory._sketchbook.cache WHERE name = 'used'
+----
+true
+
+statement ok
+FROM notebook_cache_clear('db:used')
+
+statement ok
+DELETE FROM _sketchbook.versions WHERE name = 'used'
+
+statement ok
+DELETE FROM _sketchbook.notebooks WHERE name = 'used'
 
 statement ok
 DETACH nb_use

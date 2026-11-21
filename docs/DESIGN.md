@@ -166,10 +166,16 @@ input offers only its `options=` list (`/api/options` answers `reason: "nothing 
 paging is refused, and setting an input gives it a type only where that needs no query. Peeks wait
 too (§19).
 
+A one-off run (`notebook_run`, an export) is bounded by the call it belongs to. The caller's interrupt is checked
+before the replay, `Prepare` and every cell, and after the last. Its deadline (`max_execution_time`) bounds every
+query of the runner's connection: a `ClientContextState` lowers each query's deadline to the caller's in
+`QueryBegin`, which DuckDB calls after it has set the deadline from the setting. Writing the time left as a setting
+does not work: every query would get it afresh, and a cell's own `SET max_execution_time = 0` would lift it. The
+server's runs have no caller and no bound, and a cell already running is not interrupted (only its deadline ends it).
+
 Functions that reach outside DuckDB respect its own switches: `notebook_start` (a listener on a
 port, and a browser opened with the shell) refuses when `enable_external_access` is false or
-`lock_configuration` is set, and `notebook_export(format := 'pdf')`, which starts a browser,
-refuses when `enable_external_access` is false.
+`lock_configuration` is set, and so does `notebook_export(format := 'pdf')`, which starts a browser.
 
 ## 4. Runtime architecture
 
@@ -681,13 +687,20 @@ again only when the cell is run again. After a cell that may change tables (anyt
 `SET`, `USE` and `SET VARIABLE`, `notebook::MayWrite`), the temp tables it names or newly made are
 copied into the store with their rows, and every new connection copies them back
 (`Runner::KeepTempTables`, `Runner::Restore`); `CREATE TEMP TABLE` is then left out of the replay, unless
-the copy failed. A table comes back as it was created: the statement DuckDB records for it
-(`duckdb_tables().sql`, with its keys, defaults and generated columns), then its rows; only if that
+a copy failed: then the cell's `CREATE TEMP TABLE` statements are replayed and none of its tables comes
+from the store (both would clash), and no later cell copies them in; a table an earlier cell made keeps its
+older copy, with no mark that it is older. Tests make a copy fail with the `SKETCHBOOK_TEST_FAIL_STORE_COPY`
+environment variable (a table name), which changes nothing unless it is set. A table comes back as it was created: the statement DuckDB records for it
+(`duckdb_tables().sql`, with its keys, defaults and generated columns), then its rows, a table whose
+foreign key names another after that one; only if that
 statement cannot run there (a default that uses a temp sequence, which is replayed later) is it rows
 only. `ALTER TABLE` counts as a read of its table, so the store copies it again. The remaining cost:
 those copies are made on every request, so a large *temp table* (not a `materialize=table` cell) is
 still copied per request. The store is detached when the last copy of the session's state goes (the
-server stops, or `notebook_stop`), and simply disappears with the database when it closes. If it
+server stops, or `notebook_stop`), and simply disappears with the database when it closes. Sessions are
+not evicted: one lives until the server stops. A session is a stored notebook in its database (the
+page's URL names it, `&db=`), or a file by its canonical path, so `a.sql`, `./a.sql` and a link to it
+share one; it is built outside the server's lock, so a slow read holds up no other notebook. If it
 cannot be attached, the session falls back to replaying the SQL. `notebook_run` and the exports run in
 one connection and need no store.
 
@@ -918,6 +931,19 @@ tested) and `src/functions/result_cache.cpp` (where entries live, and the sessio
   inputs cannot be checked (a table no cell defines, a non-literal path, a scan of another system) is
   `unverified` rather than `fresh`. The editor still draws unverified results like fresh ones; the
   states are visible in `notebook_cache()`.
+- **Checking costs nothing remote, and happens as each cell reads.** Review rounds 2 and 3 settled how
+  files are checked (FORMAT §8). Only local files are looked at: a remote file or a UNC path would cost a
+  request on every open, before the reader trusts the notebook, so its cells are `unverified`. A file
+  modified in the last two seconds may still change without its modified time changing (git's "racily
+  clean" rule); its version is kept with a mark, and a result made from it stays `unverified` rather
+  than becoming `stale` once the file is older. Versions are taken just before each cell runs, not once
+  per run: versions from before the run made a cell that reads what an earlier cell wrote stale forever,
+  and versions after the run would call a file changed under a cell fresh. A view is lazy, so the files
+  the views a cell reads select from count as that cell's own, taken when it runs (`KeyBuilder::ViewKey`,
+  memoized by those versions, so a chain of views costs its length); files a view cell's other statements
+  read keep the versions of when it ran. Table functions are on an
+  allow-list (`range` and the like are pure; anything else, an extension's reader or a table macro, is
+  `unverified`).
 - **Unnamed cells hash their text.** A position would hand a moved cell another cell's result. A hash of
   the text means an edited unnamed cell loses its result, which is the honest outcome; named cells keep
   theirs and go stale.

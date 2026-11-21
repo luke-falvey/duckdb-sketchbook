@@ -14,8 +14,11 @@ so remote paths work when `httpfs` is loaded.
 
 Files the functions write (`notebook_export`, `notebook_checkout`, saving in the editor) are replaced
 whole: the text goes to a temporary file beside the target, which is then moved over it, so a failed
-write leaves the old file as it was. On a file system that cannot move files (some object stores) the
-target is written directly.
+write leaves the old file as it was. A symbolic link stays a link: the file it points to is the one
+replaced (and must be one `allowed_directories` allows). The new file has the default mode, not the old
+one's, and a hard link to the old file keeps the old text. An object store's target (`s3://`, `gs://`,
+`az://`, `http(s)://`) is written directly: its upload is already all or nothing. Every other file
+system (a network share, `hdfs://`, an extension's) gets the temporary file and the move.
 
 | Function | Does |
 |---|---|
@@ -78,8 +81,13 @@ Runs every cell, charts included, in a connection of its own, and returns one ro
 order the cells ran. Tables the notebook creates persist; its views and variables do not reach the
 caller's session. The whole notebook runs before the first row is returned, so a `LIMIT` or `WHERE`
 around the call does not change how many cells run. Databases its `[notebook]` cell attached are
-detached when it returns (by `notebook_export` too). The caller's `max_execution_time` applies to each
-of its queries, and an interrupt stops it before the next cell. See
+detached when it returns (by `notebook_export` too). The caller's `max_execution_time` bounds the whole
+call, `notebook_export` too: every query the notebook runs ends by the call's deadline, whatever a cell
+`SET`s, and once the deadline has passed the call fails with *Query exceeded maximum execution time*,
+whichever cell ran out of time. An export then writes nothing, except a `data` export whose deadline passes
+while its files are written, which leaves those written so far. It holds when `lock_configuration` is set.
+An interrupt stops the call before the next cell; a cell already running finishes or reaches the
+deadline. See
 [running headless](../guides/headless.md).
 
 | Argument | Meaning |
@@ -279,8 +287,11 @@ listens on 127.0.0.1 only and every request must carry the random token in the U
 the database closes or on `notebook_stop()`. Calling it again while it runs keeps the same server
 and returns a URL for the new notebook. It is refused when `enable_external_access` is false or
 `lock_configuration` is set: the server runs the SQL its page sends and opens a browser. The path is
-checked as every function checks it (an empty path or a bad `db:` version is an error), and stored
-notebooks opened from now on are read from, saved to and cached in the current database.
+checked as every function checks it (an empty path or a bad `db:` version is an error). The URL
+names the current database (`&db=…`): stored notebooks the page opens are read from, saved to and
+cached in it, whatever a later `USE` and `notebook_start` do. A stored notebook in another database is
+another notebook, with a session of its own; a file is one notebook however its path is written
+(`a.sql`, `./a.sql`, a link to it). The editor does not save an old version (`db:x@1`).
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -290,7 +301,7 @@ notebooks opened from now on are read from, saved to and cached in the current d
 
 | Column | Type | Meaning |
 |---|---|---|
-| `url` | `VARCHAR` | `http://127.0.0.1:<port>/?token=…`, plus the notebook |
+| `url` | `VARCHAR` | `http://127.0.0.1:<port>/?token=…`, plus the notebook (`&nb=…`) and the current database (`&db=…`) |
 | `port` | `INTEGER` | The port |
 | `token` | `VARCHAR` | The token requests must carry |
 

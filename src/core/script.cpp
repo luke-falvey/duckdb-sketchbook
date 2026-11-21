@@ -141,15 +141,16 @@ bool Materialized(const Cell &cell) {
 	       cell.Option("materialize", "view") == "table";
 }
 
-//! The first words of a statement after its leading comments, upper-cased: enough to tell what it creates.
+//! The first words of a statement, upper-cased, skipping comments before and between them: enough to tell what it
+//! creates.
 std::vector<std::string> LeadingWords(const std::string &statement, size_t count) {
 	std::vector<std::string> words;
 	auto text = StripLeadingComments(statement);
 	size_t i = 0;
 	while (words.size() < count && i < text.size()) {
-		while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) {
-			i++;
-		}
+		// Comments may come between words too: `CREATE /* x */ VIEW`.
+		text = StripLeadingComments(text.substr(i));
+		i = 0;
 		std::string word;
 		while (i < text.size() && (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_')) {
 			word += static_cast<char>(std::toupper(static_cast<unsigned char>(text[i])));
@@ -179,6 +180,93 @@ bool IsCreateTempTable(const std::string &statement) {
 		}
 		// What follows AS is the query: CREATE TEMP VIEW v AS TABLE t makes a view.
 		if (word == "AS" || word == "VIEW") {
+			return false;
+		}
+	}
+	return false;
+}
+
+namespace {
+
+//! The first `count` words of a statement after its leading comments, upper-cased, a double-quoted identifier
+//! unquoted: `SET "file_search_path" = 'x'` gives SET, FILE_SEARCH_PATH.
+std::vector<std::string> LeadingNames(const std::string &statement, size_t count) {
+	std::vector<std::string> words;
+	auto text = StripLeadingComments(statement);
+	size_t i = 0;
+	while (words.size() < count && i < text.size()) {
+		// Comments may come between words too: `SET /* x */ file_search_path`.
+		text = StripLeadingComments(text.substr(i));
+		i = 0;
+		std::string word;
+		if (i < text.size() && text[i] == '"') {
+			for (i++; i < text.size(); i++) {
+				if (text[i] == '"' && i + 1 < text.size() && text[i + 1] == '"') {
+					word += '"';
+					i++;
+				} else if (text[i] == '"') {
+					i++;
+					break;
+				} else {
+					word += static_cast<char>(std::toupper(static_cast<unsigned char>(text[i])));
+				}
+			}
+		} else {
+			while (i < text.size() && (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_')) {
+				word += static_cast<char>(std::toupper(static_cast<unsigned char>(text[i])));
+				i++;
+			}
+		}
+		if (word.empty()) {
+			break;
+		}
+		words.push_back(word);
+	}
+	return words;
+}
+
+} // namespace
+
+bool SetsSetting(const Notebook &notebook, const std::string &name) {
+	std::string wanted;
+	for (char c : name) {
+		wanted += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	}
+	for (auto &cell : notebook.cells) {
+		if (cell.kind != CellKind::SQL) {
+			continue;
+		}
+		for (auto &statement : SplitStatements(cell.sql)) {
+			// SET and RESET in any scope, and PRAGMA name = value, which DuckDB still takes for a SET.
+			auto words = LeadingNames(statement.text, 3);
+			if (words.empty() || (words[0] != "SET" && words[0] != "RESET" && words[0] != "PRAGMA")) {
+				continue;
+			}
+			size_t at = 1;
+			if (words[0] != "PRAGMA" && at < words.size() &&
+			    (words[at] == "SESSION" || words[at] == "LOCAL" || words[at] == "GLOBAL")) {
+				at++;
+			}
+			if (at < words.size() && words[at] == wanted) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool IsCreateView(const std::string &statement) {
+	// CREATE [OR REPLACE] [TEMP | TEMPORARY] [SECURE] [RECURSIVE] VIEW
+	auto words = LeadingWords(statement, 7);
+	if (words.empty() || words[0] != "CREATE") {
+		return false;
+	}
+	for (size_t i = 1; i < words.size(); i++) {
+		if (words[i] == "VIEW") {
+			return true;
+		}
+		if (words[i] != "OR" && words[i] != "REPLACE" && words[i] != "TEMP" && words[i] != "TEMPORARY" &&
+		    words[i] != "SECURE" && words[i] != "RECURSIVE") {
 			return false;
 		}
 	}

@@ -84,6 +84,20 @@ struct RanCell {
 	notebook::Json value;
 };
 
+//! The versions of the files a run's cells name (CacheFileVersions), taken as the run goes, for ResultCache::Record.
+struct RunFileVersions {
+	//! Every file of the notebook, before the first cell ran (Start): for the cells that did not run. Files of such
+	//! cells missing here are looked at when the run is recorded.
+	std::map<string, string> before;
+	//! By cell index: the files that cell names, just before it ran. A file an earlier cell wrote counts as written.
+	std::map<size_t, std::map<string, string>> cells;
+
+	//! Before the first cell. Looks at nothing when the notebook's cache is off.
+	void Start(DatabaseInstance &db, const notebook::Notebook &notebook);
+	//! Just before `cell` runs.
+	void BeforeCell(DatabaseInstance &db, const notebook::Notebook &notebook, const notebook::Cell &cell);
+};
+
 //! A notebook's cache as a session holds it: every entry of the current cells in memory, written
 //! through to the store as cells run. An open notebook shows its results again after a page reload
 //! even where nothing can be written.
@@ -108,11 +122,11 @@ public:
 
 	//! Stores the results of the cells that ran, drops entries of cells that no longer exist, and
 	//! records the session's variables. With `cache: false` it removes the cache instead. `versions` are the files'
-	//! versions from before the cells ran (CacheFileVersions): a file that changed while they ran then makes them
-	//! stale. Without it, they are looked up now. With nothing in `ran`, no file is looked at.
+	//! versions as the run went (RunFileVersions): each cell is keyed with the files as it read them, so a file that
+	//! changed after a cell read it makes that cell stale. Without it, they are looked up now. With nothing in `ran`,
+	//! no file is looked at.
 	void Record(DatabaseInstance &db, const string &source, const notebook::Notebook &notebook,
-	            const SessionState &session, const vector<RanCell> &ran,
-	            const std::map<string, string> *versions = nullptr);
+	            const SessionState &session, const vector<RanCell> &ran, const RunFileVersions *versions = nullptr);
 
 	//! The browser set a variable: remembers the value it holds.
 	void SetShown(const string &name, const notebook::Json &value);
@@ -150,7 +164,10 @@ RanCell RanFromResult(int index, const string &status, const notebook::Json &res
 //! The version of every file the notebook's cells name (notebook::CacheSourceFiles), for CacheKeys: size,
 //! modified time, file id and version tag as DuckDB's file system reports them, "" when it cannot tell.
 //! Opens each local file and reads none of it. A remote file (any `scheme://` but `file://`) is not looked at and
-//! has no known version, nor has a file modified in the last two seconds (notebook::ModifiedTooRecently).
+//! has no known version, nor has a relative path while `file_search_path` is set, or a `~` path while `home_directory`
+//! is set, for the database or by a cell of the notebook (DuckDB may find it elsewhere). A
+//! file modified in the last two seconds (notebook::ModifiedTooRecently) has its version after a `?`: it may still
+//! change unseen.
 std::map<string, string> CacheFileVersions(DatabaseInstance &db, const notebook::Notebook &notebook);
 
 //! notebook_cache(path) and notebook_cache_clear(path).

@@ -579,8 +579,8 @@ whole directory, so it never needs adding to a project's own:
 ```
 
 For a notebook stored in a database (`db:<name>`), in that database's `_sketchbook.cache` table (the
-database it is read from: the current one, which `USE` chooses, for the SQL functions and for the editor
-opened by `notebook_start`),
+database it is read from: the current one, which `USE` chooses, for the SQL functions; for the editor, the
+one `notebook_start` named in the page's URL, its current database),
 `(name, cell, format, key, data, saved_at, result)` with one row per cell and one for `@state`. A notebook
 that DuckDB's file system does not have on the local file system (a URL, an object store, `hdfs://`, any
 file system an extension adds) and a notebook not saved yet have no cache. A location that cannot be
@@ -588,7 +588,11 @@ written means no cache, quietly; a run never fails because of it.
 
 **Caches from before the rename.** The extension was called `notebook` before it became `sketchbook`,
 and kept its cache in `.duckdb-notebook/` and `_notebook.cache`. When the new place has nothing for a
-notebook, those are read instead; `notebook_cache_clear` clears both. Nothing is written there.
+notebook, those are read instead; `notebook_cache_clear` clears both. Nothing is written there. Likewise,
+a stored notebook's cache was kept in the default database before it followed `USE`: when the current
+database has nothing for it and the default database stores no notebook of that name (whose cache it would
+be), the default database's `_sketchbook.cache` (then `_notebook.cache`) is read, and cleared with it,
+never written.
 
 **An entry** is JSON: `{format, cell, key, data, saved_at, result}`. `key` and `data` are the cell's keys when the
 result was made (a redraw of its charts may refresh it only while `data` still matches). `result` is exactly
@@ -609,17 +613,36 @@ edited. This is why naming cells you care about matters (§2).
   out (`hide`, `span`, `run`, `screen`);
 - the keys of the cells it reads, so a change anywhere upstream reaches every cell below it;
 - the type and value of every variable its SQL reads (unset, `NULL` and a value are all different);
-- the version of every file it names by a literal path: the first argument of a file reader
-  (`read_csv`, `read_csv_auto`, `read_parquet`, `parquet_scan`, `read_json`, `read_json_auto`,
-  `read_ndjson`, `read_json_objects`, `read_ndjson_objects`, `read_text`, `read_blob`, `read_xlsx`,
-  `sniff_csv`, `glob` and the `parquet_*` metadata functions), as one string or a list of strings, and a
-  string after `FROM` or `JOIN` (`FROM 'events.csv'`). A file's version is its size, its last-modified
-  time, its file id and its version tag (an ETag, on file systems that have one) as DuckDB's file system
-  reports them; a glob's is the list of files it matches with each one's version; a file that does not
-  exist has the version *missing*. Versions are taken when the notebook is opened and just before a
-  run, so a file that changes while the cells read it leaves them stale. Looking at a file opens it and
-  reads none of it. Only files on this machine are looked at: a remote one (any `scheme://` path but
-  `file://`) has no known version, and costs no request.
+- the version of every file it names by a literal path: the first argument of a file reader (`read_csv`,
+  `read_csv_auto`, `read_parquet`, `parquet_scan`, `read_json`, `read_json_auto`, `read_ndjson`,
+  `read_json_objects`, `read_ndjson_objects`, `read_text`, `read_blob`, `read_xlsx`, `sniff_csv`, `glob`
+  and the `parquet_*` metadata functions), as one string or a list of strings, and a string after `FROM`
+  or `JOIN` (`FROM 'events.csv'`). A file's version is its size, its last-modified time, its file id and
+  its version tag (an ETag, on file systems that have one) as DuckDB's file system reports them; a glob's
+  is the list of files it matches with each one's version; a file that does not exist has the version
+  *missing*. Versions are taken when the notebook is opened and, during a run, just before each cell
+  runs: a cell is keyed with the files as it read them, so a file that changes after a cell read it (a
+  later cell writes it, or anything else does) leaves that cell stale, and a file an earlier cell of the
+  same run wrote does not. A view cell (one that only makes views: its statements are `CREATE VIEW`s,
+  plain queries and a final named query that is not `materialize=table`) is read when a cell selects from
+  it, so that cell is keyed with the files the views it reads select from as they were when it ran. A
+  cell with any other statement (a table, a variable, an `INSERT`) keeps what it read when it ran, and is
+  keyed with its own versions throughout, the views it reads included. If such a cell also makes a view
+  (a `CREATE VIEW`, or its final named query), that view is still read as its reader runs, so the reader
+  is *unverified* at best. This is per cell: a reader of a table such a cell makes is unverified too.
+  Looking at a file opens it and reads none of it. Only files on this machine are looked at: a remote one
+  (any `scheme://` path but `file://`), a UNC path (`\\host\share\x.csv`, `//host/share/x.csv`), a
+  Windows device path (`\\.\…`, `\\?\…`, which POSIX reads as a pattern in a directory, `/?/C:/…`), a
+  path with a `net` or `network` segment in any case (the automounter's `/net/host/…`, `/Network/…`), a
+  glob with a pattern in a directory segment or a `**` (`/n?t/host/…`, `data/*/x.csv`, `/data/**`: such a
+  glob can go into whatever a pattern matched, wherever a link, the working directory or `~` leads; only
+  a pattern in the last segment, as in `data/*.csv`, lists just the directory the path names, though a
+  link in it is followed as any linked path is), a path starting with `~` not followed by a separator
+  (DuckDB reads `~net/…` as `$HOME` then `net/…`), and a `file:` URL other than `file:/…`, `file:///…` or
+  `file://localhost/…` to a local path have no known version, and cost no request. Nor has a relative
+  path while `file_search_path` is set, or a path starting with `~` while `home_directory` is set, for
+  the database or by a cell of the notebook (`SET`, `RESET`), since DuckDB may read it from somewhere
+  else.
 
 What a cell shows on top of what it computes is a second layer: its chart specs, `rows`, `width`,
 `height`, `label` and `placeholder`, and the selections only its charts filter on. Editing a query's chart or brushing a chart
@@ -635,9 +658,14 @@ fainter ink with the note *from an earlier run* until it runs. A cell whose key 
 
 - a relation that no cell defines under exactly that name: a table already in the database, a table
   of a database or schema a cell attached or created (`wh.orders`), a catalog view;
-- a remote file; a file whose version the file system cannot report (neither a modified time nor a
-  version tag); a file modified in the last two seconds, which could still change without its modified
-  time changing (modified times are often whole seconds); or a glob matching more than 1000 files;
+- a view made by a cell that keeps state (see the key above);
+- a remote file, a UNC path, a relative path while `file_search_path` is set or a `~` path while
+  `home_directory` is set (by the database or the notebook); a file whose version
+  the file system cannot report (neither a modified time nor a version tag); a file modified in the last
+  two seconds, which could still change without its modified time changing (modified times are often
+  whole seconds); or a glob matching more than 1000 files. A result made while one of its files was
+  that new stays unverified, even once the file is older: it was made from a version nothing could
+  vouch for. A cell that reads a file the cell before it wrote is usually in this case;
 - a file reader given anything but literal paths (`read_csv($path)`), or another scan of external data:
   any other `read_*`, `*_scan` or `*_query` function, `iceberg_*`, `query` and `query_table`;
 - any other table function, an extension's (`st_read`) or a table macro alike, except `range`,
@@ -648,7 +676,7 @@ The editor shows an unverified result as it shows a fresh one; `notebook_cache` 
 made) and functions such as `now()` and `random()`. A cell with an error shows nothing from the cache.
 
 **Trust.** Showing cached output executes nothing (DESIGN §3): opening a notebook reads files or rows
-and computes hashes, and makes no network request. The inputs show the values the results were made with, and the session is given
+and computes hashes, and makes no network request beyond reading the notebook itself. The inputs show the values the results were made with, and the session is given
 those values, but no cell runs until the reader runs one. Until then, changing an input marks what reads
 it stale instead of running it, a brush asks for a run, and only the remembered page of a grid can be
 seen.
@@ -656,7 +684,8 @@ seen.
 **Disposable and safe.** An entry that is not whole (truncated, not JSON, the wrong shape, another
 `format`, another cell's) is ignored, never an error. Entries are written to a temporary file of the
 writer's own (`<entry>.json.<uuid>.tmp`) and moved into place; they are not synced to disk, since an entry
-lost in a crash only means that cell reopens empty. Entries of cells that no longer exist are removed on the next run. The `format` number
+lost in a crash only means that cell reopens empty. An entry file is readable and writable by its owner
+only (mode `0600` where the file system has modes): it holds query results, which the notebook does not. Entries of cells that no longer exist are removed on the next run. The `format` number
 is raised whenever what a key covers or how an entry is laid out changes, and an entry with another
 number is simply ignored.
 
@@ -685,7 +714,10 @@ the file, so this specification is the only format.
 A stored notebook is named `db:<name>` (the newest version) or `db:<name>@<version>`, where the version
 is a whole number from 1; the name is everything between `db:` and the last `@`. It is read from the
 current database. A name a notebook is saved under holds no `@` and is not blank: `notebook_save`
-refuses one (a file `report@2.sql` is saved with `name := '...'`). `notebook_save` and `notebook_checkout` commit on a connection of their own (they
+refuses one (a file `report@2.sql` is saved with `name := '...'`). A name saved with an `@` before this
+rule is still read: `db:report@2@1` is version 1 of `report@2`, since the version follows the last `@`.
+The editor does not save `db:<name>@<version>`: an old version opens, and saving it is refused rather
+than made the newest. `notebook_save` and `notebook_checkout` commit on a connection of their own (they
 are not part of the caller's transaction); a save takes the next version number in the same
 transaction as its insert.
 

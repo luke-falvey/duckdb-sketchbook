@@ -82,7 +82,7 @@ does the same with a readable report.
 
 ## From Python
 
-The Python package of DuckDB 2.0.0 loads the extension like any other. This script checks notebooks
+The Python package of DuckDB 2.0.1 loads the extension like any other. This script checks notebooks
 and exports each one that passes to HTML:
 
 ```python
@@ -109,7 +109,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install duckdb==2.0.0
+      - run: pip install duckdb==2.0.1
       - run: python tools/check_notebooks.py tools/sketchbook.duckdb_extension out notebooks/*.sql
       - uses: actions/upload-artifact@v4
         if: always()

@@ -3,7 +3,7 @@
   "private": true,
   "description": "Loads the sketchbook extension's WebAssembly build into DuckDB-WASM in headless Chromium (test/wasm/README.md)",
   "dependencies": {
-    "@duckdb/duckdb-wasm": "1.33.1-dev118.0",
+    "@duckdb/duckdb-wasm": "1.33.1-dev121.0",
     "esbuild": "0.25.12"
   }
 }

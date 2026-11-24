@@ -1,4 +1,4 @@
-"""CI checks of the loadable extension as it ships, in a stock DuckDB (the Python package, duckdb==2.0.0).
+"""CI checks of the loadable extension as it ships, in a stock DuckDB (the Python package, duckdb==2.0.1).
 
 The SQL tests link the extension statically into DuckDB's test runner, so they never load the stripped
 sketchbook.duckdb_extension file the pipeline builds. This does, the way a user's DuckDB would (the Python
@@ -8,7 +8,7 @@ the editor server's HTTP API and its gates: the token, the Host header and the O
     python test/ci/test_loadable.py path/to/sketchbook.duckdb_extension [--allow-metadata-mismatch]
 
 --allow-metadata-mismatch loads a local build, which is stamped with DuckDB's commit hash rather than
-v2.0.0 (CLAUDE.md). CI does not pass it: a CI build that is not stamped for v2.0.0 must fail here.
+v2.0.1 (CLAUDE.md). CI does not pass it: a CI build that is not stamped for v2.0.1 must fail here.
 Needs only the standard library and duckdb.
 """
 
@@ -54,7 +54,7 @@ def connect(extension, allow_mismatch):
 
 def test_functions(con, notebook):
     version = con.execute("SELECT version()").fetchone()[0]
-    check(version == "v2.0.0", f"DuckDB is v2.0.0 (got {version})")
+    check(version == "v2.0.1", f"DuckDB is v2.0.1 (got {version})")
     loaded = con.execute("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'sketchbook'").fetchall()
     check(loaded == [(True,)], "duckdb_extensions() lists sketchbook as loaded")
     cells = con.execute(f"SELECT name, kind FROM notebook_cells({quote(notebook)}) ORDER BY idx").fetchall()

@@ -71,7 +71,7 @@ test/notebooks/    Notebook files the SQL tests read.
 examples/          Notebooks for people to read. Tests check they stay valid and runnable.
 .github/skills/    Agent skills for writing sketchbooks (notebooks) and making them look good: authoring
                    (with a template and check.sh), charts, design, preview/export, and the look itself.
-duckdb/            Submodule, pinned to the DuckDB release we build against (v2.0.0).
+duckdb/            Submodule, pinned to the DuckDB release we build against (v2.0.1).
 extension-ci-tools/ Submodule: DuckDB's shared build and CI scripts.
 third_party/       Licences of bundled assets (fonts).
 spikes/            Throwaway experiments kept as evidence. Not built or tested by CI.
@@ -113,19 +113,19 @@ A DuckDB shell with the extension already linked in, for trying things by hand.
 
 The loadable file is `build/release/extension/sketchbook/sketchbook.duckdb_extension`. A local build
 stamps it with DuckDB's commit hash, because the submodule is a shallow clone with no tag, so it
-loads into the shell built here but not into a released DuckDB. CI builds are stamped `v2.0.0`.
+loads into the shell built here but not into a released DuckDB. CI builds are stamped `v2.0.1`.
 
-To use the extension in an installed DuckDB v2.0.0 (for example one with the `hdfs` extension), build a
-copy stamped `v2.0.0` and install it; a running server must be restarted afterwards:
+To use the extension in an installed DuckDB v2.0.1 (for example one with the `hdfs` extension), build a
+copy stamped `v2.0.1` and install it; a running server must be restarted afterwards:
 
 ```bash
-ninja -C build/v2.0.0 sketchbook_loadable_extension   # configured once with -DOVERRIDE_GIT_DESCRIBE=v2.0.0
-duckdb -unsigned -init /dev/null -c "FORCE INSTALL '$PWD/build/v2.0.0/extension/sketchbook/sketchbook.duckdb_extension'"
+ninja -C build/v2.0.1 sketchbook_loadable_extension   # configured once with -DOVERRIDE_GIT_DESCRIBE=v2.0.1
+duckdb -unsigned -init /dev/null -c "FORCE INSTALL '$PWD/build/v2.0.1/extension/sketchbook/sketchbook.duckdb_extension'"
 ```
 
 Then `LOAD sketchbook` in `duckdb -unsigned`. A quicker check that a local build loads into a released
 DuckDB is the Python package, which also loads extensions with `RTLD_LOCAL` as most clients do:
-`pip install duckdb==2.0.0`, connect with `allow_unsigned_extensions` and
+`pip install duckdb==2.0.1`, connect with `allow_unsigned_extensions` and
 `allow_extensions_metadata_mismatch` set, and `LOAD` the file.
 
 The loadable extension is about 40 MB on linux_amd64 (15 MB gzipped), and about 95% of that is DuckDB
@@ -165,7 +165,7 @@ git clone --depth 1 https://github.com/emscripten-core/emsdk /opt/emsdk
 
 ```bash
 source /opt/emsdk/emsdk_env.sh
-OVERRIDE_GIT_DESCRIBE=v2.0.0 make wasm_eh
+OVERRIDE_GIT_DESCRIBE=v2.0.1 make wasm_eh
 ```
 
 Writes `build/wasm_eh/extension/sketchbook/sketchbook.duckdb_extension.wasm`. It compiles DuckDB for
@@ -351,20 +351,20 @@ create, because all test files share one database.
   The server refuses to peek until the reader has run something (`Session::trusted`, set by a run and cleared when the text is reloaded from disk; separate from the cache's `Session::ran`).
 - The html-wasm export runs on DuckDB-WASM 1.5: `$name` is rewritten to `getvariable('name')`, data
   is written with `STORAGE_VERSION 'v1.5.0'`, and selection variables start as typed NULLs.
-  The extension itself targets DuckDB-WASM 2.0 (npm `next`, `1.33.1-dev110.0` and later); see DESIGN §21
+  The extension itself targets DuckDB-WASM 2.0 (npm `next`, `1.33.1-dev121.0` and later); see DESIGN §21
   for which of these workarounds 2.0 makes unnecessary.
 - The WebAssembly build has no server, no PDF export and no process spawning: `NOTEBOOK_HOST_FEATURES`
   is off under Emscripten, `server_unavailable.cpp` replaces `server.cpp`, and `export.cpp` has one
   `#ifdef NOTEBOOK_NO_HOST_FEATURES`. Keep anything that needs sockets, threads or processes behind
   that boundary, and keep `src/core` free of platform conditionals.
-- Build wasm targets without `GEN=ninja` (they run `emmake make`) and with `OVERRIDE_GIT_DESCRIBE=v2.0.0`:
+- Build wasm targets without `GEN=ninja` (they run `emmake make`) and with `OVERRIDE_GIT_DESCRIBE=v2.0.1`:
   DuckDB-WASM refuses an extension whose stamped version or platform differs from its own, and a local
   build is otherwise stamped with a commit hash.
 - DuckDB-WASM 2.0 has two bundles: `base` is platform `wasm_eh`, `threads` is `wasm_threads`. No bundle
   loads `wasm_mvp`, though CI still builds it.
-- `wasm_threads` builds need the two flags the `Makefile` adds after including extension-ci-tools'
-  Makefile (`-fwasm-exceptions`, `-DUSE_WASM_THREADS=ON`); without them `LOAD` fails with an empty
-  dlopen error. Even with them, DuckDB-WASM's threads bundle hangs in `LOAD` about one time in eight
+- `wasm_threads` builds need `-fwasm-exceptions` and `-DUSE_WASM_THREADS=ON`; without them `LOAD`
+  fails with an empty dlopen error. extension-ci-tools' Makefile passes the second; the `Makefile`
+  adds the first (`WASM_CXX_THREADS_FLAGS`) after including it. Even with them, DuckDB-WASM's threads bundle hangs in `LOAD` about one time in eight
   (DuckDB's own extensions too), which is why `test/wasm/run.cjs` retries it there.
 - Do not build natively from a shell that has sourced `emsdk_env.sh`: `make release` then fails with
   error 127. Each Bash call starts a fresh shell, so source it only in the call that builds wasm.
@@ -375,7 +375,16 @@ create, because all test files share one database.
   `duckdb_extension_statically_link`.
 - The version of DuckDB in the `duckdb` submodule, the `duckdb_version` in
   `.github/workflows/MainDistributionPipeline.yml`, and the `extension-ci-tools` branch must all name
-  the same release.
+  the same release. extension-ci-tools has one branch per release line, not per patch release:
+  `v2.0-cyanoptera` serves every v2.0.x (`ci_tools_version`, the reusable workflow's ref and the
+  submodule's branch). Artifact names carry the version (`sketchbook-v2.0.1-extension-<platform>`),
+  so the jobs that download them change with it, as do `test/ci/test_loadable.py`, the pip pin and
+  DuckDB-WASM in `test/wasm/package.json` (an npm release whose `submodules/duckdb` is the same commit).
+- CI artifacts are the extension binaries only. This repository's workflows upload nothing of their
+  own (the docs site goes to Pages with `upload-pages-artifact`, which is a deployment, not a build
+  artifact). The reusable pipeline uploads `sketchbook.duckdb_extension` (`.wasm` for wasm targets),
+  plus, on platforms it tests, `test-support/<id>/test-support.tar.gz` (DuckDB's shell, test runner
+  and library) inside the same artifact; it has no input to turn that off except `skip_tests`.
 
 ## Rules, bands and notes on charts
 

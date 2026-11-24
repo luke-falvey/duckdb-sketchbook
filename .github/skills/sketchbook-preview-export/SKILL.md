@@ -151,6 +151,6 @@ Saving from the editor of a `db:` notebook adds a version. Use a file-backed dat
 | Old look after a rebuild | Restart the server; hard-reload the page |
 | Port in use | Stop the old server (find its PID with `ss -ltnp`) or pick another port |
 | `Forbidden` / 403 from the API | Missing token: use the full URL that `notebook_start` returned |
-| Extension will not load into a released DuckDB | Local builds are stamped with the commit; install the `v2.0.0`-stamped build (CLAUDE.md, "Build and test") and `LOAD sketchbook` in `duckdb -unsigned` |
+| Extension will not load into a released DuckDB | Local builds are stamped with the commit; install the `v2.0.1`-stamped build (CLAUDE.md, "Build and test") and `LOAD sketchbook` in `duckdb -unsigned` |
 | Notebook reading `hdfs://` fails | Run it in a DuckDB that has the `hdfs` extension (the repo's shell does not), with the preprod Hadoop config in `HADOOP_CONF_DIR` and no proxy variables in the environment |
 | PDF export fails | Pass `chrome :=` pointing at Chrome or Chromium |

@@ -114,7 +114,7 @@ async function testArch(browser, arch, origin) {
 
   const info = await sql("SELECT version() AS version, (SELECT platform FROM pragma_platform()) AS platform");
   const engine = info.rows && info.rows[0];
-  check('engine is DuckDB v2.0.0', engine && engine.version === 'v2.0.0', info);
+  check('engine is DuckDB v2.0.1', engine && engine.version === 'v2.0.1', info);
   check(`engine platform is ${arch}`, engine && engine.platform === arch, info);
 
   // What the html-wasm export works around on DuckDB-WASM 1.5 (docs/DESIGN.md section 12).

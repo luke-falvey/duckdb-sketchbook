@@ -28,7 +28,7 @@ example with `registerFileText`) and notebooks at a URL both work.
 ## Which DuckDB-WASM
 
 - **Use DuckDB-WASM 2.0.** It is published on npm under the **`next`** tag, not `latest`:
-  `@duckdb/duckdb-wasm` version `1.33.1-dev110.0` or later is built from DuckDB v2.0.0. The `latest`
+  `@duckdb/duckdb-wasm` version `1.33.1-dev121.0` or later is built from DuckDB v2.0.1. The `latest`
   tag is still DuckDB 1.5 and cannot load the extension. The npm version number does not say which
   DuckDB is inside.
 - **Pick the build for your bundle.** DuckDB-WASM 2.0 has two bundles:
@@ -48,12 +48,12 @@ DuckDB-WASM has started.
 
 Every push to `main` builds `wasm_eh`, `wasm_threads` and `wasm_mvp` with the other platforms; see
 [install](../start/install.md#download-the-ci-build). The artifact
-`sketchbook-v2.0.0-extension-wasm_eh` holds `sketchbook.duckdb_extension.wasm`. Serve that file from your
+`sketchbook-v2.0.1-extension-wasm_eh` holds `sketchbook.duckdb_extension.wasm`. Serve that file from your
 site: DuckDB-WASM loads extensions by URL.
 
 To build it yourself you need Emscripten 6.0.9, the version DuckDB's pipeline uses; the
 [contributor notes](https://github.com/luke-falvey/duckdb-sketchbook/blob/main/CLAUDE.md#webassembly-duckdb-wasm)
-have the commands. Build it stamped for v2.0.0 (`OVERRIDE_GIT_DESCRIBE=v2.0.0`): DuckDB-WASM refuses an
+have the commands. Build it stamped for v2.0.1 (`OVERRIDE_GIT_DESCRIBE=v2.0.1`): DuckDB-WASM refuses an
 extension whose recorded version or platform does not match exactly.
 
 ## Load it

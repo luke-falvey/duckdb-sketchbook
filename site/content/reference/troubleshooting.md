@@ -78,7 +78,7 @@ List them all with: SELECT start_line, errors FROM notebook_cells('broken.sql') 
 | `INSTALL sketchbook FROM community` fails | It is not in the community repository yet. See [install](../start/install.md) |
 | The extension refuses to load: not signed | Start DuckDB with `-unsigned` (or `allow_unsigned_extensions` in a client) |
 | The extension refuses to load: built for another platform | Download the artifact whose name ends in your platform; `PRAGMA platform;` tells you which |
-| The extension refuses to load: built for another version | It must match your DuckDB exactly. CI builds are for v2.0.0; a local build is stamped with DuckDB's commit and only loads into the shell built with it |
+| The extension refuses to load: built for another version | It must match your DuckDB exactly. CI builds are for v2.0.1; a local build is stamped with DuckDB's commit and only loads into the shell built with it |
 | The shell exits at once, with an error about another extension | A `~/.duckdbrc` loads something this DuckDB lacks. Start with `-init /dev/null` |
 | `$name` is a syntax error | You are on DuckDB before 2.0. Notebooks need 2.0 |
 
@@ -86,7 +86,7 @@ List them all with: SELECT start_line, errors FROM notebook_cells('broken.sql') 
 
 | Symptom | Cause and fix |
 |---|---|
-| `LOAD` fails: the extension was built for another version or platform | Use DuckDB-WASM 2.0 (npm tag `next`, `1.33.1-dev110.0` or later; `latest` is DuckDB 1.5), the `wasm_eh` build for the `base` bundle and `wasm_threads` for `threads`, stamped `v2.0.0` |
+| `LOAD` fails: the extension was built for another version or platform | Use DuckDB-WASM 2.0 (npm tag `next`, `1.33.1-dev121.0` or later; `latest` is DuckDB 1.5), the `wasm_eh` build for the `base` bundle and `wasm_threads` for `threads`, stamped `v2.0.1` |
 | `LOAD` refuses an unsigned extension | Open the database with `allowUnsignedExtensions: true` ([running in the browser](../guides/browser.md#load-it)) |
 | `LOAD` never returns, in the `threads` bundle | A race in DuckDB-WASM's threaded extension loading, about one time in eight, DuckDB's own extensions too. Retry in a fresh page with a timeout, or use the `base` bundle |
 | `notebook_start: the notebook server is not available in this build …` | The server needs sockets and threads, which DuckDB-WASM does not have. Use the other functions |

@@ -34,7 +34,8 @@ jobs:
   # sketchbook-<duckdb_version>-extension-<platform> holding sketchbook.duckdb_extension (.wasm for the
   # wasm targets). On the platforms the pipeline tests, extension-ci-tools also puts
   # test-support/<id>/test-support.tar.gz (DuckDB's shell, unittest and libduckdb) in the same artifact
-  # (scripts/ci_phase.py, upload). Only skip_tests turns that off, so it stays. The jobs below read only
+  # (scripts/ci_phase.py, upload). Only skip_tests turns that off, so pull requests keep it and builds of
+  # main strip it afterwards (strip-test-support, at the end of this file). The jobs below read only
   # the extension files. The docs workflow's upload-pages-artifact is the Pages deployment.
   duckdb-stable-build:
     name: Build extension binaries
@@ -130,3 +131,65 @@ jobs:
           npm install --no-save --no-audit --no-fund playwright@1.63.0
           npx playwright install --with-deps chromium
       - run: node test/wasm/run.cjs wasm_eh ${{ github.event_name != 'pull_request' && 'wasm_threads' || '' }}
+
+  # Builds of main publish only the extension binaries. The shared distribution
+  # workflow also puts test-support/<id>/test-support.tar.gz (DuckDB shell,
+  # unittest, libduckdb) into each tested platform's artifact, and its only
+  # switch for that is skip_tests. So once every job that reads the artifacts
+  # has finished, re-upload them without it. Pull requests keep the bundle.
+  list-main-artifacts:
+    name: List main-branch extension artifacts
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [duckdb-stable-build, extension-sizes, loadable-test, wasm-test]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      - id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          names=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name | contains("-extension-")) | .name' \
+            | jq -Rsc 'split("\n") | map(select(length > 0))')
+          echo "names=$names" >> "$GITHUB_OUTPUT"
+          echo "Extension artifacts: $names"
+
+  strip-test-support:
+    name: Strip test-support (${{ matrix.name }})
+    needs: list-main-artifacts
+    if: ${{ !cancelled() && needs.list-main-artifacts.outputs.names != '' && needs.list-main-artifacts.outputs.names != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.list-main-artifacts.outputs.names) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: artifact
+      - id: strip
+        run: |
+          if [ -d artifact/test-support ]; then
+            rm -rf artifact/test-support
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          find artifact -type f
+          if ! find artifact -type f -name '*.duckdb_extension*' | grep -q .; then
+            echo "::error::no extension binary in ${{ matrix.name }}"
+            exit 1
+          fi
+      - if: ${{ steps.strip.outputs.changed == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: artifact
+          overwrite: true
+          if-no-files-found: error

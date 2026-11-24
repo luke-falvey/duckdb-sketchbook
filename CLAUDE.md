@@ -389,6 +389,9 @@ create, because all test files share one database.
   re-upload each artifact without `test-support/` once every job that reads the artifacts has
   finished, so builds of `main` keep only the binaries. Pull requests keep the bundle. A new job that
   downloads the artifacts must be added to `list-main-artifacts`' `needs`.
+- Releases: pushing a `v*` tag runs the full pipeline and the `release` job publishes a GitHub release
+  with one `sketchbook-<tag>-<platform>.duckdb_extension` (`.wasm` for wasm targets) per platform plus
+  `SHA256SUMS`, once the build, `loadable-test` and `wasm-test` have passed.
 
 ## Rules, bands and notes on charts
 

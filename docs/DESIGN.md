@@ -1172,13 +1172,13 @@ set aside as not needed.
 
 ### Which DuckDB-WASM
 
-- **2.0 is on npm under `next`, not `latest`.** `@duckdb/duckdb-wasm` `1.33.1-dev110.0` and later are
-  built with DuckDB at the `v2.0.0` tag, the same commit as our submodule (the npm `gitHead` of each
-  release pins `submodules/duckdb` at `d54cbbe3`). `latest` (`1.33.1-dev57.0`) is still engine 1.5.
+- **2.0 is on npm under `next`, not `latest`.** `@duckdb/duckdb-wasm` `1.33.1-dev121.0` and later are
+  built with DuckDB at the `v2.0.1` tag, the same commit as our submodule (the npm `gitHead` of each
+  release pins `submodules/duckdb` at `8d78114e`). `latest` (`1.33.1-dev57.0`) is still engine 1.5.
   The npm version number says nothing about the engine.
 - **An extension must match the engine exactly.** Its footer records the DuckDB version and platform,
   and DuckDB-WASM refuses a mismatch. A local build is stamped with a commit hash unless built with
-  `OVERRIDE_GIT_DESCRIBE=v2.0.0`.
+  `OVERRIDE_GIT_DESCRIBE=v2.0.1`.
 - **Two bundles, two platforms.** DuckDB-WASM 2.0 ships `base`, whose platform is `wasm_eh`, and
   `threads` (`wasm_threads`, which needs a cross-origin isolated page). There is no `wasm_mvp`
   bundle any more. CI still builds `wasm_mvp`, because the community repository does, but nothing
@@ -1220,7 +1220,8 @@ extension-ci-tools' release branch (`v2.0-cyanoptera`) leaves out two flags when
 `wasm_threads`. The first is `-fwasm-exceptions`, lost to a misnamed variable. The second is
 `-DUSE_WASM_THREADS=ON`, DuckDB's switch that links a side module against shared memory. Without them
 `LOAD` fails with an empty `dlopen` error, and DuckDB's own `icu` extension built the same way fails
-too. Its `main` branch has both. Our `Makefile` sets them after including its Makefile. With them,
+too. Its `main` branch has both, and the release branch has since gained the second; our `Makefile`
+sets the first after including its Makefile. With them,
 everything works in the threads bundle as in the base one, except that `LOAD` hangs about one time in
 eight. The `icu` extension hangs at the same rate, so this is a race in DuckDB-WASM's threaded
 extension loading, not in this extension. The test retries a hung `LOAD` in a fresh page, for
@@ -1237,7 +1238,7 @@ seconds once DuckDB-WASM has started (about 1.6 seconds).
 
 Nothing in the export changed yet. Two separate steps are open:
 
-1. **Move the runtime to DuckDB-WASM 2.0** (`wasm/package.json` to `1.33.1-dev118.0` or later; the
+1. **Move the runtime to DuckDB-WASM 2.0** (`wasm/package.json` to `1.33.1-dev121.0` or later; the
    bundle files are now `duckdb-base.wasm` and `duckdb-browser-base.worker.js`). This removes the 1.5
    workarounds of §12:
    - the `$name` to `getvariable('name')` rewrite (the test checks `$name` works);

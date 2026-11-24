@@ -18,10 +18,10 @@ CLAUDE.md for installing it):
 
 ```bash
 source /path/to/emsdk/emsdk_env.sh
-OVERRIDE_GIT_DESCRIBE=v2.0.0 make wasm_eh
+OVERRIDE_GIT_DESCRIBE=v2.0.1 make wasm_eh
 ```
 
-`OVERRIDE_GIT_DESCRIBE=v2.0.0` stamps the extension for DuckDB v2.0.0; without it a local build is
+`OVERRIDE_GIT_DESCRIBE=v2.0.1` stamps the extension for DuckDB v2.0.1; without it a local build is
 stamped with a commit hash and DuckDB-WASM refuses it. Do not set `GEN=ninja`: the wasm targets
 run `emmake make`. The first build compiles DuckDB for WebAssembly and takes about 12 minutes on 4
 cores. `make wasm_threads` builds the threaded variant (the `Makefile` adds two flags extension-ci-tools'
@@ -42,8 +42,8 @@ CI runs the same script on the artifacts the extension pipeline builds (`wasm-te
 
 ## Which DuckDB-WASM
 
-`package.json` pins `@duckdb/duckdb-wasm` `1.33.1-dev118.0`, published under npm's `next` tag and
-built from DuckDB v2.0.0. An extension must match the engine's version and platform exactly (its
+`package.json` pins `@duckdb/duckdb-wasm` `1.33.1-dev121.0`, published under npm's `next` tag and
+built from DuckDB v2.0.1. An extension must match the engine's version and platform exactly (its
 footer records both), so it cannot load into npm's `latest`, which is still engine v1.5. DuckDB-WASM
 2.0 has two bundles: `base`, whose platform is `wasm_eh`, and `threads`, `wasm_threads`. Nothing
 loads `wasm_mvp` builds any more.

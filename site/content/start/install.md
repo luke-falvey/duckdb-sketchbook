@@ -1,6 +1,6 @@
 # Install
 
-duckdb-sketchbook is a DuckDB extension. It needs **DuckDB 2.0.0**: notebooks read variables with
+duckdb-sketchbook is a DuckDB extension. It needs **DuckDB 2.0.1**: notebooks read variables with
 `$name`, which DuckDB introduced in 2.0.
 
 The extension is not yet in DuckDB's community repository, so `INSTALL sketchbook FROM community` does
@@ -28,7 +28,7 @@ CI builds the extension for every native platform DuckDB distributes for:
 "Tested" means DuckDB's pipeline runs the SQL test suite there (its test phase skips only `linux_arm64`
 and `osx_amd64`; for the WebAssembly builds, a job of this repository loads them into DuckDB-WASM in
 headless Chromium and runs the notebook functions); "built only" platforms compile and link but are not
-tested. On `linux_amd64` CI also loads the shipped extension file into the DuckDB 2.0.0 Python package
+tested. On `linux_amd64` CI also loads the shipped extension file into the DuckDB 2.0.1 Python package
 and checks the editor server's HTTP API. The table is what every push to `main` runs
 ([`MainDistributionPipeline.yml`](https://github.com/luke-falvey/duckdb-sketchbook/blob/main/.github/workflows/MainDistributionPipeline.yml));
 a pull request builds and tests only `linux_amd64`, `windows_amd64` and `wasm_eh`. In DuckDB-WASM the editor's server and
@@ -41,15 +41,15 @@ links against the DuckDB already in the page and is 1.2 MB.
 
 ## Download the CI build
 
-Every push to `main` builds the extension for each platform above, stamped for DuckDB v2.0.0.
+Every push to `main` builds the extension for each platform above, stamped for DuckDB v2.0.1.
 
 1. Open the latest successful
    [*Build and test* run on `main`](https://github.com/luke-falvey/duckdb-sketchbook/actions/workflows/MainDistributionPipeline.yml?query=branch%3Amain+is%3Asuccess)
    (you need to be signed in to GitHub to download artifacts).
-2. Download the artifact for your platform, `sketchbook-v2.0.0-extension-<platform>` (for example
-   `sketchbook-v2.0.0-extension-osx_arm64`), and unzip it. It holds `sketchbook.duckdb_extension`.
+2. Download the artifact for your platform, `sketchbook-v2.0.1-extension-<platform>` (for example
+   `sketchbook-v2.0.1-extension-osx_arm64`), and unzip it. It holds `sketchbook.duckdb_extension`.
    To find your platform's name, run `PRAGMA platform;` in your DuckDB.
-3. Install it into DuckDB 2.0.0. The build is not signed, so DuckDB must be started with `-unsigned`:
+3. Install it into DuckDB 2.0.1. The build is not signed, so DuckDB must be started with `-unsigned`:
 
 ```sh
 duckdb -unsigned -c "FORCE INSTALL '/path/to/sketchbook.duckdb_extension'"
@@ -85,9 +85,9 @@ This gives you two things:
 - `./build/release/duckdb`, a DuckDB shell with the extension already linked in. Nothing to load.
 - `build/release/extension/sketchbook/sketchbook.duckdb_extension`, the loadable file.
 
-The loadable file from a local build is stamped with DuckDB's commit hash rather than `v2.0.0`, so it
+The loadable file from a local build is stamped with DuckDB's commit hash rather than `v2.0.1`, so it
 loads into the shell built alongside it but not into a released DuckDB. To use it in an installed
-DuckDB v2.0.0, build a copy stamped `v2.0.0`; the
+DuckDB v2.0.1, build a copy stamped `v2.0.1`; the
 [contributor notes](https://github.com/luke-falvey/duckdb-sketchbook/blob/main/CLAUDE.md#build-and-test)
 show how.
 

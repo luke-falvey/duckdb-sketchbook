@@ -30,11 +30,17 @@ jobs:
   #   nothing else, to keep them cheap. Pushes to main and manual runs (workflow_dispatch, which also
   #   works on a branch) build every platform, with one failing platform not cancelling the others.
   #   opt_in_archs: the platforms DuckDB's matrix leaves out unless asked for (opt-ins override reduced mode).
+  # Artifacts: this job is the only one in the repository that uploads any. Each platform uploads
+  # sketchbook-<duckdb_version>-extension-<platform> holding sketchbook.duckdb_extension (.wasm for the
+  # wasm targets). On the platforms the pipeline tests, extension-ci-tools also puts
+  # test-support/<id>/test-support.tar.gz (DuckDB's shell, unittest and libduckdb) in the same artifact
+  # (scripts/ci_phase.py, upload). Only skip_tests turns that off, so it stays. The jobs below read only
+  # the extension files. The docs workflow's upload-pages-artifact is the Pages deployment.
   duckdb-stable-build:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      duckdb_version: v2.0.0
+      duckdb_version: v2.0.1
       ci_tools_version: v2.0-cyanoptera
       extension_name: sketchbook
       opt_in_archs: ${{ github.event_name != 'pull_request' && 'linux_amd64_musl;linux_arm64_musl;osx_amd64;windows_arm64' || '' }}
@@ -86,12 +92,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: sketchbook-v2.0.0-extension-linux_amd64
+          name: sketchbook-v2.0.1-extension-linux_amd64
           path: artifacts/linux_amd64
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install duckdb==2.0.0
+      - run: pip install duckdb==2.0.1
       - run: python test/ci/test_loadable.py artifacts/linux_amd64/sketchbook.duckdb_extension
 
   # The pipeline does not test wasm builds, so this loads the wasm_eh and wasm_threads artifacts
@@ -106,13 +112,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: sketchbook-v2.0.0-extension-wasm_eh
+          name: sketchbook-v2.0.1-extension-wasm_eh
           path: build/wasm_eh/extension/sketchbook
       # Pull requests build wasm_eh only (the reduced matrix above).
       - uses: actions/download-artifact@v4
         if: ${{ github.event_name != 'pull_request' }}
         with:
-          name: sketchbook-v2.0.0-extension-wasm_threads
+          name: sketchbook-v2.0.1-extension-wasm_threads
           path: build/wasm_threads/extension/sketchbook
       - uses: actions/setup-node@v4
         with:

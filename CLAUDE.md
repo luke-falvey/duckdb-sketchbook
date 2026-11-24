@@ -384,7 +384,11 @@ create, because all test files share one database.
   own (the docs site goes to Pages with `upload-pages-artifact`, which is a deployment, not a build
   artifact). The reusable pipeline uploads `sketchbook.duckdb_extension` (`.wasm` for wasm targets),
   plus, on platforms it tests, `test-support/<id>/test-support.tar.gz` (DuckDB's shell, test runner
-  and library) inside the same artifact; it has no input to turn that off except `skip_tests`.
+  and library) inside the same artifact; it has no input to turn that off except `skip_tests`. On
+  pushes to `main`, `list-main-artifacts` and `strip-test-support` in `MainDistributionPipeline.yml`
+  re-upload each artifact without `test-support/` once every job that reads the artifacts has
+  finished, so builds of `main` keep only the binaries. Pull requests keep the bundle. A new job that
+  downloads the artifacts must be added to `list-main-artifacts`' `needs`.
 
 ## Rules, bands and notes on charts
 
